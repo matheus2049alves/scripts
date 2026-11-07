@@ -56,6 +56,7 @@ anki.anki_url = opts.anki_url
 media.ffmpeg_path = opts.ffmpeg_path
 media.audio_padding_start = opts.audio_padding_start
 media.audio_padding_end = opts.audio_padding_end
+analyzer.ffmpeg_path = opts.ffmpeg_path
 
 local default_cache = utils.join_path(script_dir, "vocab_cache.json")
 local cache_file = (opts.cache_path ~= "") and opts.cache_path or default_cache
@@ -201,20 +202,28 @@ end
 local function trigger_expression_analysis()
     local video_path = mp.get_property("path")
     if not video_path then
-        mp.osd_message("[AnkiMinerator] Nenhum video aberto", 2.5)
+        mp.osd_message("[AnkiMinerator] Nenhum video aberto", 3)
         return
     end
 
-    mp.osd_message("[AnkiMinerator] Iniciando analise previa de expressoes com IA...", 2.5)
-    analyzer.analyze_video_subtitles(video_path, nil, opts.gemini_api_key, opts.gemini_model,
-        function(current, total)
-            mp.osd_message(string.format("[AnkiMinerator] Analisando expressoes na legenda: lote %d/%d...", current, total), 15)
+    mp.osd_message("[AnkiMinerator] Localizando legenda do video...", 2)
+    local ok, err = analyzer.analyze_video_subtitles(video_path, nil, opts.gemini_api_key, opts.gemini_model,
+        function(current, total, items_found)
+            mp.osd_message(string.format("[AnkiMinerator] Analisando expressoes na legenda: lote %d/%d (%d detectadas)...", current, total, items_found or 0), 15)
         end,
-        function(total_found)
-            mp.osd_message(string.format("[AnkiMinerator] Analise concluida: %d expressoes detectadas e salvas em cache!", total_found), 4)
+        function(total_found, error_count)
+            if total_found > 0 then
+                mp.osd_message(string.format("[AnkiMinerator] Analise concluida com sucesso!\n%d expressoes detectadas e salvas em cache.", total_found), 6)
+            else
+                mp.osd_message(string.format("[AnkiMinerator] Analise finalizada, mas nenhuma expressao foi encontrada.\n(Erros em lotes: %d - Veja: gemini_last_response.json)", error_count or 0), 6)
+            end
             if last_cue then update_sub_overlay(last_cue.text) end
         end
     )
+
+    if not ok then
+        mp.osd_message(string.format("[AnkiMinerator] Nao foi possivel analisar:\n%s", tostring(err)), 6)
+    end
 end
 
 -- Alterna a exibição da legenda colorida
