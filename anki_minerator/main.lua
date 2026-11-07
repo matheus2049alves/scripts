@@ -103,7 +103,8 @@ local function update_sub_overlay(raw_sub)
     }
 
     mp.set_property_bool("sub-visibility", false)
-    overlay.data = classifier.format_ass_line(clean_text, opts.font_size)
+    local exprs = analyzer.find_expressions_in_sentence(clean_text)
+    overlay.data = classifier.format_ass_line(clean_text, opts.font_size, exprs)
     overlay:update()
 end
 

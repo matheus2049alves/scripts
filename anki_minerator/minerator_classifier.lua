@@ -38,37 +38,110 @@ function M.classify_word(raw_word)
     return M.colors.new, "new"
 end
 
--- Gera a linha da legenda com formatação ASS e cores palavra por palavra
-function M.format_ass_line(cleaned_text, font_size)
-    if not cleaned_text or cleaned_text == "" then
-        return ""
+-- Determina a cor de uma expressão baseada nas palavras que a compõem
+local function classify_expression(expr, known_words, manual_known)
+    local text = expr.matchedText or expr.canonical or ""
+    local words = cleaner.extract_words(text)
+    local all_known = true
+    local any_manual = false
+
+    for _, w in ipairs(words) do
+        if not stopwords.is_function_word(w) then
+            if not known_words[w] and not manual_known[w] then
+                all_known = false
+                break
+            end
+            if manual_known[w] then any_manual = true end
+        end
     end
+
+    if not all_known then return M.colors.new end
+    if any_manual then return M.colors.manual end
+    return M.colors.known
+end
+
+-- Identifica os intervalos de caracteres das expressões presentes no texto
+local function find_expression_ranges(cleaned_text, expressions, known_words, manual_known)
+    local ranges = {}
+    if not expressions or #expressions == 0 then return ranges end
+    local lower_text = cleaned_text:lower()
+
+    for _, expr in ipairs(expressions) do
+        local target = (expr.matchedText or expr.canonical or ""):lower():match("^%s*(.-)%s*$")
+        if target and #target > 2 then
+            local escaped = target:gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
+            local s, e = lower_text:find("%f[%a]" .. escaped .. "%f[%A]")
+            if not s then s, e = lower_text:find(escaped, 1, true) end
+            if s and e then
+                local color = classify_expression(expr, known_words, manual_known)
+                table.insert(ranges, { start_pos = s, end_pos = e, color = color })
+            end
+        end
+    end
+    return ranges
+end
+
+-- Retorna a expressão ativa para a posição atual de caractere
+local function get_active_range(pos, ranges)
+    for _, r in ipairs(ranges) do
+        if pos >= r.start_pos and pos <= r.end_pos then return r end
+    end
+    return nil
+end
+
+-- Gera a linha da legenda com formatação ASS, cores e sublinhado em expressões
+function M.format_ass_line(cleaned_text, font_size, expressions)
+    if not cleaned_text or cleaned_text == "" then return "" end
 
     local size = font_size or 28
     local prefix = string.format("{\\an2\\fs%d\\b1\\bord2.5\\3c&H000000&\\shad1\\4c&H000000&}", size)
-    local parts = {}
-    local pos = 1
-    local total_len = #cleaned_text
+    local ranges = find_expression_ranges(cleaned_text, expressions, M.known_words, M.manual_known)
+    local parts, pos, total_len = {}, 1, #cleaned_text
+    local in_underline = false
 
     while pos <= total_len do
         local w_start, w_end = cleaned_text:find("[%w']+", pos)
         if not w_start then
-            local rest = cleaned_text:sub(pos)
-            table.insert(parts, string.format("{\\1c%s}%s", M.colors.neutral, rest))
+            if in_underline then table.insert(parts, "{\\u0}"); in_underline = false end
+            table.insert(parts, string.format("{\\1c%s}%s", M.colors.neutral, cleaned_text:sub(pos)))
             break
         end
 
         if w_start > pos then
             local punct = cleaned_text:sub(pos, w_start - 1)
-            table.insert(parts, string.format("{\\1c%s}%s", M.colors.neutral, punct))
+            local range = get_active_range(pos, ranges)
+            if range and in_underline then
+                table.insert(parts, punct)
+            else
+                if in_underline then table.insert(parts, "{\\u0}"); in_underline = false end
+                table.insert(parts, string.format("{\\1c%s}%s", M.colors.neutral, punct))
+            end
         end
 
         local word = cleaned_text:sub(w_start, w_end)
-        local color = M.classify_word(word)
-        table.insert(parts, string.format("{\\1c%s}%s", color, word))
+        local range = get_active_range(w_start, ranges)
+
+        if range then
+            if not in_underline then
+                table.insert(parts, string.format("{\\1c%s\\u1}%s", range.color, word))
+                in_underline = true
+            else
+                table.insert(parts, string.format("{\\1c%s}%s", range.color, word))
+            end
+            if w_end >= range.end_pos then
+                table.insert(parts, "{\\u0}")
+                in_underline = false
+            end
+        else
+            if in_underline then table.insert(parts, "{\\u0}"); in_underline = false end
+            local color = M.classify_word(word)
+            table.insert(parts, string.format("{\\1c%s}%s", color, word))
+        end
+
         pos = w_end + 1
     end
 
+    if in_underline then table.insert(parts, "{\\u0}") end
     return prefix .. table.concat(parts, "")
 end
 
