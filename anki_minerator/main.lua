@@ -1,6 +1,6 @@
 -- main.lua
 -- AnkiMinerator para mpv (Windows)
--- Mineração de vocabulário com legenda colorida, captura de áudio e screenshot via AnkiConnect
+-- Mineração de vocabulário com legenda colorida, captura de áudio, screenshot e IA Gemini
 
 local mp = require("mp")
 local utils = require("mp.utils")
@@ -14,6 +14,7 @@ local cleaner = require("minerator_cleaner")
 local classifier = require("minerator_classifier")
 local anki = require("minerator_anki")
 local media = require("minerator_media")
+local gemini = require("minerator_gemini")
 
 -- Opções padrão
 local opts = {
@@ -30,13 +31,13 @@ local opts = {
     audio_padding_end = 0.20,
     ffmpeg_path = "",
     gemini_api_key = "",
-    gemini_model = "gemini-2.5-flash"
+    gemini_model = "gemini-3.5-flash-lite"
 }
 
--- Lê de portable_config/script-opts/anki_minerator.conf
+-- 1. Lê de portable_config/script-opts/anki_minerator.conf
 options.read_options(opts, "anki_minerator")
 
--- Lê de anki_minerator/anki_minerator.conf se existir localmente
+-- 2. Lê de anki_minerator/anki_minerator.conf se existir localmente
 local function load_local_conf(conf_path)
     local f = io.open(conf_path, "r")
     if not f then return end
@@ -58,15 +59,7 @@ local function load_local_conf(conf_path)
 end
 load_local_conf(utils.join_path(script_dir, "anki_minerator.conf"))
 
--- Suporte a variavel de ambiente caso nao esteja no arquivo de configuracao
-if opts.gemini_api_key == "" then
-    local env_key = os.getenv("GEMINI_API_KEY")
-    if env_key and env_key ~= "" then
-        opts.gemini_api_key = env_key
-    end
-end
-
--- Configura dependências nos módulos
+-- Configura dependências nos submódulos
 anki.anki_url = opts.anki_url
 media.ffmpeg_path = opts.ffmpeg_path
 media.audio_padding_start = opts.audio_padding_start
@@ -78,7 +71,7 @@ local cache_file = (opts.cache_path ~= "") and opts.cache_path or default_cache
 local overlay = mp.create_osd_overlay("ass-events")
 local last_cue = nil
 
--- Carrega o vocabulário inicial (do cache ou do TSV)
+-- Carrega o vocabulário inicial
 local function init_vocabulary()
     local cached_words = anki.load_cache(cache_file)
     if cached_words then
@@ -127,20 +120,46 @@ local function update_sub_overlay(raw_sub)
     overlay:update()
 end
 
--- Gera o verso estruturado do cartão
-local function build_card_back(sentence, video_title, time_formatted)
-    local template = [[<div style="text-align: left; line-height: 1.6; font-size: 16px;">
-<b>Expression Breakdown:</b><br>
-<b>Sentence:</b> "%s"<br>
-• <b>Meaning in Context:</b> [Enter definition]<br>
-• <b>Nuance (Tone & Register):</b> <br>
-• <b>Cultural Implications:</b> <br>
-• <b>Source:</b> %s @ %s
-</div>]]
-    return string.format(template, sentence, video_title or "Local Video", time_formatted or "00:00")
+-- Detecta a palavra ou expressão-alvo em foco na frase (termos em vermelho)
+local function get_target_expression(sentence)
+    local words = cleaner.extract_words(sentence)
+    local unknown = {}
+    for _, w in ipairs(words) do
+        local _, status = classifier.classify_word(w)
+        if status == "new" then
+            table.insert(unknown, w)
+        end
+    end
+
+    if #unknown > 0 then
+        return unknown[1]
+    end
+    return sentence
 end
 
--- Cria o cartão no Anki com áudio e screenshot da legenda atual
+-- Gera o verso usando a IA Gemini ou template formatado
+local function generate_card_back_content(sentence, video_title, time_formatted)
+    local target = get_target_expression(sentence)
+    local api_key = gemini.resolve_api_key(opts.gemini_api_key)
+
+    if api_key == "" then
+        local blank = gemini.get_blank_template(target, sentence, video_title, time_formatted)
+        return blank, target, false, "Chave Gemini nao encontrada no conf ou no ambiente"
+    end
+
+    mp.osd_message(string.format("[AnkiMinerator] Consultando Gemini IA para '%s'...", target), 10)
+    local ai_text, err = gemini.generate_card_back(target, sentence, api_key, opts.gemini_model)
+
+    if not ai_text then
+        local blank = gemini.get_blank_template(target, sentence, video_title, time_formatted)
+        return blank, target, false, tostring(err)
+    end
+
+    local html = gemini.format_back_html(ai_text, video_title, time_formatted)
+    return html, target, true, "OK"
+end
+
+-- Cria o cartão no Anki com áudio, screenshot e verso gerado
 local function mine_current_sentence()
     if not last_cue or not last_cue.text or last_cue.text == "" then
         mp.osd_message("[AnkiMinerator] Nenhuma legenda ativa para minerar", 2.5)
@@ -153,7 +172,7 @@ local function mine_current_sentence()
         return
     end
 
-    mp.osd_message("[AnkiMinerator] Minerando cartao...", 1.5)
+    mp.osd_message("[AnkiMinerator] 1/3: Capturando audio e screenshot...", 1.5)
 
     -- 1. Captura screenshot
     local temp_snap, snap_filename = media.get_temp_filepath("jpg")
@@ -163,7 +182,7 @@ local function mine_current_sentence()
         return
     end
 
-    -- 2. Extrai trecho de áudio
+    -- 2. Extrai áudio
     local temp_audio, audio_filename = media.get_temp_filepath("mp3")
     local audio_ok, audio_err = media.extract_audio(video_path, last_cue.start, last_cue.finish, temp_audio)
     if not audio_ok then
@@ -172,32 +191,33 @@ local function mine_current_sentence()
         return
     end
 
-    -- 3. Envia mídia para AnkiConnect
+    -- 3. Gera o verso do cartão (via Gemini ou template)
+    local title = mp.get_property("media-title") or "Video"
+    local time_pos = mp.get_property_osd("time-pos") or "00:00"
+    local back_html, target, is_ai_ok, ai_info = generate_card_back_content(last_cue.text, title, time_pos)
+
+    -- 4. Envia mídia para o AnkiConnect
     anki.store_media(audio_filename, temp_audio)
     anki.store_media(snap_filename, temp_snap)
 
-    -- 4. Prepara campos do cartão
-    local title = mp.get_property("media-title") or "Video"
-    local time_pos = mp.get_property_osd("time-pos") or "00:00"
+    -- 5. Monta campos e adiciona nota
     local front_html = string.format(
         '<div style="font-size: 22px; line-height: 1.4; margin-bottom: 8px;">%s</div><br>[sound:%s]<br><img src="%s">',
         last_cue.text, audio_filename, snap_filename
     )
-    local back_html = build_card_back(last_cue.text, title, time_pos)
 
     local fields = {}
     fields[opts.front_field] = front_html
     fields[opts.back_field] = back_html
 
-    -- 5. Cria a nota no Anki
     local note_id, anki_err = anki.add_card(opts.deck_name, opts.model_name, fields, { "anki-minerator", "mpv-mining" })
 
-    -- Limpa arquivos temporários locais
+    -- Limpa arquivos temporários do disco
     os.remove(temp_audio)
     os.remove(temp_snap)
 
     if not note_id then
-        mp.osd_message("[AnkiMinerator] Erro Anki: " .. tostring(anki_err), 4)
+        mp.osd_message("[AnkiMinerator] Erro Anki: " .. tostring(anki_err), 5)
         return
     end
 
@@ -208,7 +228,13 @@ local function mine_current_sentence()
     end
     anki.save_cache(cache_file, classifier.known_words)
 
-    mp.osd_message(string.format("[AnkiMinerator] Card criado com sucesso (#%s)!", tostring(note_id)), 3)
+    -- Notificação final ao usuário com feedback detalhado
+    if is_ai_ok then
+        mp.osd_message(string.format("[AnkiMinerator] Card #%s criado com IA Gemini [%s]!", tostring(note_id), target), 3.5)
+    else
+        mp.osd_message(string.format("[AnkiMinerator] Card #%s criado, MAS IA FALHOU:\n%s\n(Log detalhado salvo em: gemini_last_response.json)", tostring(note_id), ai_info), 7)
+    end
+
     update_sub_overlay(last_cue.text)
 end
 
