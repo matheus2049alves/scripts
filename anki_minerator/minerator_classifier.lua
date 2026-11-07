@@ -3,6 +3,7 @@
 
 local cleaner = require("minerator_cleaner")
 local stopwords = require("minerator_stopwords")
+local utils = require("mp.utils")
 
 local M = {}
 
@@ -79,6 +80,49 @@ function M.mark_sentence_as_known(text)
             M.manual_known[w] = true
         end
     end
+end
+
+-- Marca um termo específico (palavra ou expressão) como "já sabia"
+function M.mark_term_as_known(term)
+    if not term or term == "" then return end
+    local words = cleaner.extract_words(term)
+    for _, w in ipairs(words) do
+        if not stopwords.is_function_word(w) then
+            M.manual_known[w] = true
+        end
+    end
+end
+
+-- Salva a lista manual "já sabia" em arquivo JSON
+function M.save_manual_cache(path)
+    if not path or path == "" then return false end
+    local list = {}
+    for w, _ in pairs(M.manual_known) do
+        table.insert(list, w)
+    end
+    local json_str = utils.format_json(list)
+    if not json_str then return false end
+    local f = io.open(path, "w")
+    if not f then return false end
+    f:write(json_str)
+    f:close()
+    return true
+end
+
+-- Carrega a lista manual "já sabia" do arquivo JSON
+function M.load_manual_cache(path)
+    if not path or path == "" then return false end
+    local f = io.open(path, "r")
+    if not f then return false end
+    local content = f:read("*all")
+    f:close()
+    local list, err = utils.parse_json(content)
+    if not list or type(list) ~= "table" then return false end
+    for _, w in ipairs(list) do
+        local norm = cleaner.normalize_word(w)
+        if norm ~= "" then M.manual_known[norm] = true end
+    end
+    return true
 end
 
 -- Marca palavras da frase como "adiado"

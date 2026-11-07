@@ -117,15 +117,12 @@ end
 -- Localiza a legenda ativa (externa ou extrai da embutida)
 function M.find_subtitle_source(video_path)
     local tracks = mp.get_property_native("track-list") or {}
-    -- 1. Trilha externa carregada
     for _, track in ipairs(tracks) do
         if track.type == "sub" and track["external-filename"] then
             local f = io.open(track["external-filename"], "r")
             if f then f:close(); return track["external-filename"] end
         end
     end
-
-    -- 2. Arquivo .srt ao lado do vídeo
     if video_path then
         local base = video_path:gsub("%.[^.]+$", "")
         for _, ext in ipairs({ ".srt", ".en.srt", ".eng.srt", ".default.srt", ".pt.srt", ".vtt" }) do
@@ -134,8 +131,6 @@ function M.find_subtitle_source(video_path)
             if f then f:close(); return cand end
         end
     end
-
-    -- 3. Legenda embutida no contêiner
     for _, track in ipairs(tracks) do
         if track.type == "sub" and not track["external-filename"] then
             local extracted, err = M.extract_embedded_sub(video_path)
@@ -143,7 +138,6 @@ function M.find_subtitle_source(video_path)
             return nil, err
         end
     end
-
     return nil, "not_found"
 end
 
@@ -168,23 +162,13 @@ end
 
 local function build_batch_prompt(lines_chunk)
     local formatted = {}
-    for i, line in ipairs(lines_chunk) do
-        table.insert(formatted, string.format("[%d] %s", i, line))
-    end
+    for i, line in ipairs(lines_chunk) do table.insert(formatted, string.format("[%d] %s", i, line)) end
     return string.format([[You are an expert English linguist specialized in Second Language Acquisition (SLA).
-Analyze the following numbered transcript lines and identify all Phrasal Verbs (including separable forms like "figure it out", "wear out"), Idioms (e.g. "at the end of the day", "make sense"), and high-value Collocations (e.g. "prior to", "go high").
-
-Lines to analyze:
+Analyze the transcript lines and identify Phrasal Verbs (e.g. "figure out"), Idioms (e.g. "at the end of the day"), and Collocations (e.g. "go high").
+Lines:
 %s
-
-OUTPUT INSTRUCTIONS:
-1. Return ONLY a valid JSON array of objects, with no markdown code blocks and no explanation.
-2. Each object must have:
-   - "canonical": canonical base form (e.g. "go high", "figure out", "day off")
-   - "matchedText": EXACT verbatim phrase as it appears in the line
-   - "type": "phrasal_verb" or "idiom" or "collocation"
-   - "line": integer index of the line
-3. Do NOT include single words. Only multi-word expressions.]], table.concat(formatted, "\n"))
+OUTPUT: Return ONLY a valid JSON array of objects (no markdown, no explanation).
+Format: [{"canonical": "base form", "matchedText": "verbatim text in line", "type": "phrasal_verb|idiom|collocation", "line": 1}]. No single words.]], table.concat(formatted, "\n"))
 end
 
 local function save_analyzer_log(payload_str, response_str, err_msg)
@@ -192,13 +176,7 @@ local function save_analyzer_log(payload_str, response_str, err_msg)
     local debug_path = utils.join_path(script_dir, "gemini_last_response.json")
     local f = io.open(debug_path, "w")
     if not f then return end
-    f:write(utils.format_json({
-        action = "expression_analyzer",
-        timestamp = os.date("%Y-%m-%d %H:%M:%S"),
-        payload = payload_str,
-        raw_response = response_str,
-        error = err_msg
-    }) or tostring(response_str))
+    f:write(utils.format_json({ action = "expression_analyzer", timestamp = os.date("%Y-%m-%d %H:%M:%S"), payload = payload_str, raw_response = response_str, error = err_msg }) or tostring(response_str))
     f:close()
 end
 
@@ -255,27 +233,17 @@ end
 -- Varre a legenda do vídeo atual com IA em lotes
 function M.analyze_video_subtitles(video_path, srt_path, api_key, model_name, on_progress, on_complete)
     if M.is_analyzing then return false, "Analise ja em andamento" end
-
     local resolved_key = gemini.resolve_api_key(api_key)
-    if resolved_key == "" then
-        return false, "Chave Gemini ausente (defina no anki_minerator.conf ou GEMINI_API_KEY)"
-    end
+    if resolved_key == "" then return false, "Chave Gemini ausente" end
 
-    local target_srt = (srt_path and srt_path ~= "") and srt_path or nil
-    local err_type = nil
-    if not target_srt then target_srt, err_type = M.find_subtitle_source(video_path) end
-
+    local target_srt, err_type = (srt_path and srt_path ~= "") and srt_path or M.find_subtitle_source(video_path)
     if not target_srt then
-        if err_type == "ffmpeg_missing" then
-            return false, "Legenda embutida detectada, mas FFmpeg nao encontrado!\nColoque ffmpeg.exe em C:\\mpv\\ ou configure em anki_minerator.conf"
-        end
-        return false, err_type or "Nenhum arquivo de legenda encontrado para este video"
+        if err_type == "ffmpeg_missing" then return false, "Legenda embutida, mas FFmpeg nao encontrado!" end
+        return false, err_type or "Nenhum arquivo de legenda encontrado"
     end
 
     local cues = M.read_subtitles_from_file(target_srt)
-    if #cues == 0 then
-        return false, "Nenhuma linha legivel encontrada na legenda: " .. tostring(target_srt)
-    end
+    if #cues == 0 then return false, "Nenhuma linha legivel encontrada na legenda: " .. tostring(target_srt) end
 
     M.is_analyzing = true
     local chunk_size = 50

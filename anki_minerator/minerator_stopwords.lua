@@ -1,4 +1,4 @@
-qua-- minerator_stopwords.lua
+-- minerator_stopwords.lua
 -- Lista de palavras de função neutras (function words) do AnkiMinerator
 -- Não contam como candidatas e são exibidas com cor neutra
 

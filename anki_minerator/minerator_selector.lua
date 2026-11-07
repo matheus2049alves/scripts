@@ -27,9 +27,10 @@ function M.highlight_term(sentence, term, color)
 end
 
 -- Extrai todos os termos desconhecidos candidatos da frase de forma concisa
-function M.extract_candidates(sentence, known_words, detected_expressions)
+function M.extract_candidates(sentence, known_words, detected_expressions, mode)
     local candidates = {}
     local seen = {}
+    local is_known_mode = (mode == "known")
 
     -- 1. Inclui expressões multi-palavra detectadas que não sejam totalmente conhecidas
     if detected_expressions then
@@ -53,7 +54,7 @@ function M.extract_candidates(sentence, known_words, detected_expressions)
         if not stopwords.is_function_word(w) and not known_words[w] and not seen[w] then
             local in_expression = false
             for _, expr in ipairs(candidates) do
-                if expr.type ~= "sentence" and expr.canonical:lower():find("%f[%a]" .. w .. "%f[%A]") then
+                if expr.type ~= "sentence" and expr.type ~= "all" and expr.canonical:lower():find("%f[%a]" .. w .. "%f[%A]") then
                     in_expression = true
                     break
                 end
@@ -70,12 +71,20 @@ function M.extract_candidates(sentence, known_words, detected_expressions)
         end
     end
 
-    -- 3. Adiciona a opção de minerar a frase inteira
-    table.insert(candidates, {
-        text = "Frase inteira",
-        canonical = sentence,
-        type = "sentence"
-    })
+    -- 3. Adiciona a opção de lote (todas as palavras no modo known ou frase inteira no mining)
+    if is_known_mode then
+        table.insert(candidates, {
+            text = "Todas as palavras da frase",
+            canonical = sentence,
+            type = "all"
+        })
+    else
+        table.insert(candidates, {
+            text = "Frase inteira",
+            canonical = sentence,
+            type = "sentence"
+        })
+    end
 
     return candidates
 end
@@ -92,15 +101,20 @@ function M.close_menu()
 end
 
 -- Exibe o menu OSD e captura a tecla numérica do usuário
-function M.open_menu(candidates, on_select, on_cancel)
+function M.open_menu(candidates, on_select, on_cancel, opts_menu)
     if M.active then M.close_menu() end
     M.active = true
 
+    opts_menu = opts_menu or {}
+    local border = opts_menu.border_color or "&H0B9EF5&"
+    local cancel_col = opts_menu.cancel_color or "&H4444EF&"
+    local title = opts_menu.title_text or "  {\\1c&H4444EF&}MINERAR NO ANKI{\\1c&HFFFFFF&} — Escolha a palavra ou expressao em foco:\\N"
+
     local lines = {
         "{\\an5\\fs22\\b1\\bord2\\3c&H000000&\\shad1\\1c&HFFFFFF&}",
-        "{\\1c&H0B9EF5&}═══════════════════════════════════════════════{\\1c&HFFFFFF&}\\N",
-        "  {\\1c&H4444EF&}MINERAR NO ANKI{\\1c&HFFFFFF&} — Escolha a palavra ou expressao em foco:\\N",
-        "{\\1c&H0B9EF5&}───────────────────────────────────────────────{\\1c&HFFFFFF&}\\N"
+        string.format("{\\1c%s}═══════════════════════════════════════════════{\\1c&HFFFFFF&}\\N", border),
+        title,
+        string.format("{\\1c%s}───────────────────────────────────────────────{\\1c&HFFFFFF&}\\N", border)
     }
 
     local max_items = math.min(#candidates, 9)
@@ -109,6 +123,7 @@ function M.open_menu(candidates, on_select, on_cancel)
         local label = cand.text
         local tag = (cand.type == "word") and "{\\1c&H4444EF&}[Palavra]{\\1c&HFFFFFF&}"
             or (cand.type == "sentence") and "{\\1c&HAFA39C&}[Sentenca]{\\1c&HFFFFFF&}"
+            or (cand.type == "all") and "{\\1c&H0B9EF5&}[Todas]{\\1c&HFFFFFF&}"
             or "{\\1c&H0B9EF5&}[Expressao]{\\1c&HFFFFFF&}"
 
         table.insert(lines, string.format("   {\\1c&H7FFF00&}[%d]{\\1c&HFFFFFF&}  %s  %s\\N", i, label, tag))
@@ -120,9 +135,9 @@ function M.open_menu(candidates, on_select, on_cancel)
         end)
     end
 
-    table.insert(lines, "{\\1c&H0B9EF5&}───────────────────────────────────────────────{\\1c&HFFFFFF&}\\N")
-    table.insert(lines, "  Pressione {\\1c&H7FFF00&}[1-" .. max_items .. "]{\\1c&HFFFFFF&} para escolher | {\\1c&H4444EF&}[ESC/Q]{\\1c&HFFFFFF&} Cancelar\\N")
-    table.insert(lines, "{\\1c&H0B9EF5&}═══════════════════════════════════════════════{\\1c&HFFFFFF&}")
+    table.insert(lines, string.format("{\\1c%s}───────────────────────────────────────────────{\\1c&HFFFFFF&}\\N", border))
+    table.insert(lines, string.format("  Pressione {\\1c&H7FFF00&}[1-%d]{\\1c&HFFFFFF&} para escolher | {\\1c%s}[ESC/Q]{\\1c&HFFFFFF&} Cancelar\\N", max_items, cancel_col))
+    table.insert(lines, string.format("{\\1c%s}═══════════════════════════════════════════════{\\1c&HFFFFFF&}", border))
 
     local cancel_fn = function()
         M.close_menu()
@@ -133,6 +148,42 @@ function M.open_menu(candidates, on_select, on_cancel)
 
     M.menu_overlay.data = table.concat(lines, "")
     M.menu_overlay:update()
+end
+
+-- Abre menu interativo para marcar palavra ou expressão como "Já Sabia" (Âmbar)
+function M.open_known_menu(sentence, classifier, analyzer, manual_cache_file, on_complete)
+    local exprs = analyzer and analyzer.find_expressions_in_sentence(sentence) or {}
+    local all_known = {}
+    for k, v in pairs(classifier.known_words or {}) do all_known[k] = v end
+    for k, v in pairs(classifier.manual_known or {}) do all_known[k] = v end
+
+    local candidates = M.extract_candidates(sentence, all_known, exprs, "known")
+    if #candidates <= 1 then
+        mp.osd_message("[AnkiMinerator] Todas as palavras da frase ja sao conhecidas!", 2.5)
+        return
+    end
+
+    mp.set_property_bool("pause", true)
+    local menu_opts = {
+        title_text = "  {\\1c&H0B9EF5&}JÁ SABIA (ÂMBAR){\\1c&HFFFFFF&} — Escolha o termo que você já conhece:\\N",
+        border_color = "&H0B9EF5&",
+        cancel_color = "&HAFA39C&"
+    }
+
+    M.open_menu(candidates, function(selected)
+        mp.set_property_bool("pause", false)
+        if selected.type == "all" then
+            classifier.mark_sentence_as_known(sentence)
+            mp.osd_message("[AnkiMinerator] Frase inteira marcada como 'Já Sabia' (Âmbar)!", 2.5)
+        else
+            classifier.mark_term_as_known(selected.text)
+            mp.osd_message(string.format("[AnkiMinerator] '%s' marcado como 'Já Sabia' (Âmbar)!", selected.text), 2.5)
+        end
+        if manual_cache_file then classifier.save_manual_cache(manual_cache_file) end
+        if on_complete then on_complete() end
+    end, function()
+        mp.set_property_bool("pause", false)
+    end, menu_opts)
 end
 
 return M

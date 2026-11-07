@@ -60,11 +60,13 @@ analyzer.ffmpeg_path = opts.ffmpeg_path
 
 local default_cache = utils.join_path(script_dir, "vocab_cache.json")
 local cache_file = (opts.cache_path ~= "") and opts.cache_path or default_cache
+local manual_cache_file = utils.join_path(script_dir, "manual_known_cache.json")
 
 local overlay = mp.create_osd_overlay("ass-events")
 local last_cue = nil
 
 local function init_vocabulary()
+    classifier.load_manual_cache(manual_cache_file)
     local cached_words = anki.load_cache(cache_file)
     if cached_words then
         classifier.known_words = cached_words
@@ -198,6 +200,17 @@ local function open_mining_selector()
     end)
 end
 
+-- Abre o menu de seleção para marcar termo como "Já Sabia" (Âmbar)
+local function open_known_selector()
+    if not last_cue or not last_cue.text then
+        mp.osd_message("[AnkiMinerator] Nenhuma legenda ativa", 2)
+        return
+    end
+    selector.open_known_menu(last_cue.text, classifier, analyzer, manual_cache_file, function()
+        update_sub_overlay(last_cue.text)
+    end)
+end
+
 -- Dispara a análise prévia de expressões da legenda do vídeo com IA
 local function trigger_expression_analysis()
     local video_path = mp.get_property("path")
@@ -271,9 +284,7 @@ mp.add_key_binding("Ctrl+m", "minerator-mine-direct", open_mining_selector)
 mp.add_key_binding("Alt+a", "minerator-analyze-subtitles", trigger_expression_analysis)
 mp.add_key_binding("c", "minerator-toggle-color", toggle_color_overlay)
 mp.add_key_binding("Ctrl+Shift+r", "minerator-reload-vocab", reload_vocabulary)
-mp.add_key_binding("Ctrl+Shift+k", "minerator-mark-known", function()
-    if last_cue then classifier.mark_sentence_as_known(last_cue.text); update_sub_overlay(last_cue.text) end
-end)
+mp.add_key_binding("Ctrl+Shift+k", "minerator-mark-known", open_known_selector)
 mp.add_key_binding("Ctrl+Shift+p", "minerator-mark-postponed", function()
     if last_cue then classifier.mark_sentence_as_postponed(last_cue.text); update_sub_overlay(last_cue.text) end
 end)
