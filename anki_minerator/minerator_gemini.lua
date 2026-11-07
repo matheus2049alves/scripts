@@ -7,7 +7,7 @@ local utils = require("mp.utils")
 local M = {}
 
 M.default_model = "gemini-3.5-flash-lite"
-M.fallback_models = { "gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-flash-latest" }
+M.cached_models = nil
 
 -- Sanitiza chave de API removendo espaços e quebras de linha
 function M.sanitize_api_key(raw_key)
@@ -18,18 +18,12 @@ end
 -- Obtém a chave configurada, da variável de ambiente ou do Registro do Windows
 function M.resolve_api_key(configured_key)
     local key = M.sanitize_api_key(configured_key)
-    if key ~= "" then
-        return key
-    end
+    if key ~= "" then return key end
 
-    -- 1. Variável de ambiente do processo
     local env_key = os.getenv("GEMINI_API_KEY")
     key = M.sanitize_api_key(env_key)
-    if key ~= "" then
-        return key
-    end
+    if key ~= "" then return key end
 
-    -- 2. Variável de ambiente do usuário no Windows (HKCU/Environment)
     local res = mp.command_native({
         name = "subprocess",
         playback_only = false,
@@ -44,12 +38,69 @@ function M.resolve_api_key(configured_key)
     })
     if res.status == 0 and res.stdout and res.stdout ~= "" then
         key = M.sanitize_api_key(res.stdout)
-        if key ~= "" then
-            return key
+        if key ~= "" then return key end
+    end
+    return ""
+end
+
+-- Busca a lista completa de modelos disponíveis para a chave do usuário
+function M.fetch_available_models(api_key)
+    if M.cached_models and #M.cached_models > 0 then
+        return M.cached_models
+    end
+
+    local clean_key = M.resolve_api_key(api_key)
+    if clean_key == "" then return { M.default_model } end
+
+    local url = string.format("https://generativelanguage.googleapis.com/v1beta/models?key=%s", clean_key)
+    local res = mp.command_native({
+        name = "subprocess",
+        playback_only = false,
+        capture_stdout = true,
+        args = { "curl.exe", "-s", "--max-time", "8", url }
+    })
+
+    if res.status ~= 0 or not res.stdout or res.stdout == "" then
+        return { M.default_model, "gemini-3.5-flash", "gemini-flash-latest" }
+    end
+
+    local data = utils.parse_json(res.stdout)
+    if not data or not data.models then
+        return { M.default_model, "gemini-3.5-flash", "gemini-flash-latest" }
+    end
+
+    local flash_lite, flash_std, others = {}, {}, {}
+    for _, item in ipairs(data.models) do
+        local name = (item.name or ""):gsub("^models/", "")
+        local methods = item.supportedGenerationMethods or {}
+        local can_gen = false
+        for _, m in ipairs(methods) do
+            if m == "generateContent" then can_gen = true break end
+        end
+
+        if can_gen and name:match("gemini") and not name:match("image") and not name:match("tts") and not name:match("computer%-use") then
+            if name:match("flash%-lite") then
+                table.insert(flash_lite, name)
+            elseif name:match("flash") then
+                table.insert(flash_std, name)
+            else
+                table.insert(others, name)
+            end
         end
     end
 
-    return ""
+    -- Concatena em ordem de prioridade de velocidade
+    local sorted = {}
+    for _, m in ipairs(flash_lite) do table.insert(sorted, m) end
+    for _, m in ipairs(flash_std) do table.insert(sorted, m) end
+    for _, m in ipairs(others) do table.insert(sorted, m) end
+
+    if #sorted == 0 then
+        sorted = { M.default_model, "gemini-3.5-flash", "gemini-flash-latest" }
+    end
+
+    M.cached_models = sorted
+    return sorted
 end
 
 -- Salva log de diagnóstico da última requisição para inspeção
@@ -72,9 +123,7 @@ end
 
 -- Formata o texto plano da IA com HTML legível para o Anki
 function M.format_back_html(raw_text, source_title, time_formatted)
-    if not raw_text or raw_text == "" then
-        return ""
-    end
+    if not raw_text or raw_text == "" then return "" end
 
     local lines = {}
     for line in raw_text:gmatch("[^\r\n]+") do
@@ -126,14 +175,11 @@ local function execute_gemini_request(model, api_key, json_payload)
     local temp_json = utils.join_path(temp_dir, string.format("minerator_payload_%d.json", os.time()))
 
     local f = io.open(temp_json, "w")
-    if not f then
-        return nil, "Nao foi possivel criar arquivo temporario para payload"
-    end
+    if not f then return nil, "Nao foi possivel criar arquivo temporario para payload" end
     f:write(json_payload)
     f:close()
 
     local url = string.format("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", model, api_key)
-
     local res = mp.command_native({
         name = "subprocess",
         playback_only = false,
@@ -160,7 +206,7 @@ local function execute_gemini_request(model, api_key, json_payload)
     return res.stdout, nil
 end
 
--- Chama a API do Gemini com fallback automático de modelos em caso de 503/404
+-- Chama a API do Gemini com fallback dinâmico em toda a família de modelos da conta
 function M.generate_card_back(expression, sentence, api_key, preferred_model)
     local clean_key = M.resolve_api_key(api_key)
     if clean_key == "" then
@@ -195,12 +241,13 @@ Expression Breakdown:
     }
     local json_body = utils.format_json(payload)
 
-    -- Lista de modelos a tentar em ordem (preferido primeiro)
+    -- Obtém a família completa de modelos disponíveis na conta do usuário
+    local family = M.fetch_available_models(clean_key)
     local models_to_try = {}
     if preferred_model and preferred_model ~= "" then
         table.insert(models_to_try, preferred_model)
     end
-    for _, m in ipairs(M.fallback_models) do
+    for _, m in ipairs(family) do
         if m ~= preferred_model then
             table.insert(models_to_try, m)
         end
@@ -219,11 +266,10 @@ Expression Breakdown:
                 if parts and #parts > 0 and parts[1].text then
                     save_debug_log(json_body, raw_out, nil)
                     local txt = parts[1].text:gsub("^```[a-z]*\r?\n", ""):gsub("\r?\n```$", "")
-                    return txt, nil
+                    return txt, nil, model
                 end
             end
 
-            -- Se houve erro na API (ex: 503 ou 404), salva log e tenta o próximo modelo
             if data and data.error then
                 local err_code = data.error.code or 400
                 local err_msg = data.error.message or "Erro desconhecido"
@@ -236,7 +282,7 @@ Expression Breakdown:
         end
     end
 
-    return nil, last_error or "Nenhum modelo Gemini respondeu com sucesso"
+    return nil, last_error or "Nenhum modelo Gemini respondeu com sucesso", nil
 end
 
 return M
