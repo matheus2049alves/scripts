@@ -109,6 +109,14 @@ local function extract_words_from_notes(notes, known_words)
         end
 
         if front_val and front_val ~= "" then
+            for hl in front_val:gmatch("<span[^>]*>(.-)</span>") do
+                local hn = cleaner.normalize_item(cleaner.remove_html_and_tags(hl))
+                if hn ~= "" then known_words[hn] = true end
+            end
+            for hl in front_val:gmatch("<b[^>]*>(.-)</b>") do
+                local hn = cleaner.normalize_item(cleaner.remove_html_and_tags(hl))
+                if hn ~= "" then known_words[hn] = true end
+            end
             local clean_text = cleaner.remove_html_and_tags(front_val)
             local words = cleaner.extract_words(clean_text)
             for _, w in ipairs(words) do
@@ -163,6 +171,14 @@ function M.load_from_tsv(tsv_path)
             -- Primeira coluna separada por tabulação é a frente
             local front = line:match("^([^\t]+)")
             if front then
+                for hl in front:gmatch("<span[^>]*>(.-)</span>") do
+                    local hn = cleaner.normalize_item(cleaner.remove_html_and_tags(hl))
+                    if hn ~= "" then known_words[hn] = true end
+                end
+                for hl in front:gmatch("<b[^>]*>(.-)</b>") do
+                    local hn = cleaner.normalize_item(cleaner.remove_html_and_tags(hl))
+                    if hn ~= "" then known_words[hn] = true end
+                end
                 local clean = cleaner.remove_html_and_tags(front)
                 local words = cleaner.extract_words(clean)
                 for _, w in ipairs(words) do

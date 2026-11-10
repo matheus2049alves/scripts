@@ -36,8 +36,10 @@ function M.extract_candidates(sentence, known_words, detected_expressions, mode)
     if detected_expressions then
         for _, expr in ipairs(detected_expressions) do
             local text = expr.matchedText or expr.canonical
-            local norm = cleaner.normalize_word(text)
-            if norm ~= "" and not seen[norm] and not known_words[norm] then
+            local norm = cleaner.normalize_item(text)
+            local can_norm = cleaner.normalize_item(expr.canonical or "")
+            local is_known = (norm ~= "" and known_words[norm]) or (can_norm ~= "" and known_words[can_norm])
+            if norm ~= "" and not seen[norm] and not is_known then
                 seen[norm] = true
                 table.insert(candidates, {
                     text = text,

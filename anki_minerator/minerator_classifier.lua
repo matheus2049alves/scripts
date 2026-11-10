@@ -38,30 +38,25 @@ function M.classify_word(raw_word)
     return M.colors.new, "new"
 end
 
--- Determina a cor de uma expressão baseada nas palavras que a compõem
-local function classify_expression(expr, known_words, manual_known)
-    local text = expr.matchedText or expr.canonical or ""
-    local words = cleaner.extract_words(text)
-    local all_known = true
-    local any_manual = false
+-- Determina a cor de uma expressão baseada no status atômico dela (espelhando AnkiMinerator)
+local function classify_expression(expr, known_words, manual_known, postponed)
+    local canonical = cleaner.normalize_item(expr.canonical or "")
+    local matched = cleaner.normalize_item(expr.matchedText or "")
 
-    for _, w in ipairs(words) do
-        if not stopwords.is_function_word(w) then
-            if not known_words[w] and not manual_known[w] then
-                all_known = false
-                break
-            end
-            if manual_known[w] then any_manual = true end
-        end
+    if (canonical ~= "" and postponed and postponed[canonical]) or (matched ~= "" and postponed and postponed[matched]) then
+        return M.colors.postponed
     end
-
-    if not all_known then return M.colors.new end
-    if any_manual then return M.colors.manual end
-    return M.colors.known
+    if (canonical ~= "" and manual_known and manual_known[canonical]) or (matched ~= "" and manual_known and manual_known[matched]) then
+        return M.colors.manual
+    end
+    if (canonical ~= "" and known_words and known_words[canonical]) or (matched ~= "" and known_words and known_words[matched]) then
+        return M.colors.known
+    end
+    return M.colors.new
 end
 
 -- Identifica os intervalos de caracteres das expressões presentes no texto
-local function find_expression_ranges(cleaned_text, expressions, known_words, manual_known)
+local function find_expression_ranges(cleaned_text, expressions, known_words, manual_known, postponed)
     local ranges = {}
     if not expressions or #expressions == 0 then return ranges end
     local lower_text = cleaned_text:lower()
@@ -73,7 +68,7 @@ local function find_expression_ranges(cleaned_text, expressions, known_words, ma
             local s, e = lower_text:find("%f[%a]" .. escaped .. "%f[%A]")
             if not s then s, e = lower_text:find(escaped, 1, true) end
             if s and e then
-                local color = classify_expression(expr, known_words, manual_known)
+                local color = classify_expression(expr, known_words, manual_known, postponed)
                 table.insert(ranges, { start_pos = s, end_pos = e, color = color })
             end
         end
@@ -95,7 +90,7 @@ function M.format_ass_line(cleaned_text, font_size, expressions)
 
     local size = font_size or 28
     local prefix = string.format("{\\an2\\fs%d\\b1\\bord2.5\\3c&H000000&\\shad1\\4c&H000000&}", size)
-    local ranges = find_expression_ranges(cleaned_text, expressions, M.known_words, M.manual_known)
+    local ranges = find_expression_ranges(cleaned_text, expressions, M.known_words, M.manual_known, M.postponed)
     local parts, pos, total_len = {}, 1, #cleaned_text
     local in_underline = false
 
@@ -158,6 +153,8 @@ end
 -- Marca um termo específico (palavra ou expressão) como "já sabia"
 function M.mark_term_as_known(term)
     if not term or term == "" then return end
+    local norm = cleaner.normalize_item(term)
+    if norm ~= "" then M.manual_known[norm] = true end
     local words = cleaner.extract_words(term)
     for _, w in ipairs(words) do
         if not stopwords.is_function_word(w) then

@@ -164,7 +164,7 @@ local function mine_target(target_term)
         return
     end
 
-    local norm = cleaner.normalize_word(target_term)
+    local norm = cleaner.normalize_item(target_term)
     if norm ~= "" then classifier.known_words[norm] = true end
     anki.save_cache(cache_file, classifier.known_words)
 

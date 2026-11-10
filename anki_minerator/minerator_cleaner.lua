@@ -71,6 +71,17 @@ function M.normalize_word(raw_word)
     return normalized:match("^%s*(.-)%s*$") or ""
 end
 
+-- Normaliza um item (palavra ou expressão multi-palavra)
+function M.normalize_item(text)
+    if not text then return "" end
+    local clean = text:lower():match("^%s*(.-)%s*$") or ""
+    if clean:find("%s") then
+        local collapsed = clean:gsub("%s+", " ")
+        return collapsed:gsub("[^%w'%s]", "")
+    end
+    return M.normalize_word(clean)
+end
+
 -- Extrai lista de palavras normalizadas de um texto
 function M.extract_words(text)
     local words = {}
