@@ -16,6 +16,7 @@ local media = require("minerator_media")
 local gemini = require("minerator_gemini")
 local selector = require("minerator_selector")
 local analyzer = require("minerator_analyzer")
+local matcher = require("minerator_matcher")
 
 local opts = {
     anki_url = "http://127.0.0.1:8765",
@@ -46,8 +47,7 @@ local function load_local_conf(conf_path)
         if k and v and not line:match("^#") then
             if v == "yes" or v == "true" then opts[k] = true
             elseif v == "no" or v == "false" then opts[k] = false
-            elseif tonumber(v) then opts[k] = tonumber(v)
-            else opts[k] = v end
+            else opts[k] = tonumber(v) or v end
         end
     end
     f:close()
@@ -62,22 +62,23 @@ local default_cache = utils.join_path(script_dir, "vocab_cache.json")
 local cache_file = (opts.cache_path ~= "") and opts.cache_path or default_cache
 local manual_cache_file = utils.join_path(script_dir, "manual_known_cache.json")
 local sync_meta_file = utils.join_path(script_dir, "sync_meta.json")
+local senses_cache_file = utils.join_path(script_dir, "senses_cache.json")
 
 local overlay = mp.create_osd_overlay("ass-events")
 local last_cue = nil
 
 local function init_vocabulary()
     classifier.load_manual_cache(manual_cache_file)
+    classifier.known_senses = anki.load_senses_cache(senses_cache_file) or {}
+    anki.known_senses = classifier.known_senses
     local cached_words = anki.load_cache(cache_file)
     if cached_words then
-        classifier.known_words = cached_words
-        return
+        classifier.known_words = cached_words; return
     end
     if opts.tsv_fallback_path and opts.tsv_fallback_path ~= "" then
         local tsv_words = anki.load_from_tsv(opts.tsv_fallback_path)
         if tsv_words then
-            classifier.known_words = tsv_words
-            anki.save_cache(cache_file, tsv_words)
+            classifier.known_words = tsv_words; anki.save_cache(cache_file, tsv_words)
         end
     end
 end
@@ -110,7 +111,7 @@ local function update_sub_overlay(raw_sub)
 end
 
 -- Minera o termo escolhido para o Anki
-local function mine_target(target_term, canonical_term)
+local function mine_target(target_term, canonical_term, sense)
     if not last_cue or not last_cue.text or last_cue.text == "" then
         mp.osd_message("[AnkiMinerator] Nenhuma legenda ativa para minerar", 2.5)
         return
@@ -168,6 +169,13 @@ local function mine_target(target_term, canonical_term)
         if cnorm ~= "" then classifier.known_words[cnorm] = true end
     end
     anki.save_cache(cache_file, classifier.known_words)
+    local s_txt = sense or matcher.extract_meaning_from_back(back_html)
+    if s_txt and s_txt ~= "" then
+        local k = cleaner.normalize_item(canonical_term or target_term)
+        classifier.known_senses[k] = classifier.known_senses[k] or {}
+        table.insert(classifier.known_senses[k], s_txt)
+        anki.save_senses_cache(senses_cache_file, classifier.known_senses)
+    end
 
     if ai_text then
         mp.osd_message(string.format("[AnkiMinerator] Card #%s criado com Gemini [%s]!", tostring(note_id), target_term), 3.5)
@@ -189,13 +197,13 @@ local function open_mining_selector()
 
     -- Se só tiver 1 termo novo além da frase completa, minera direto
     if #candidates == 2 and candidates[1].type == "word" then
-        mine_target(candidates[1].text, candidates[1].canonical)
+        mine_target(candidates[1].text, candidates[1].canonical, candidates[1].sense)
         return
     end
 
     mp.set_property_bool("pause", true)
     selector.open_menu(candidates, function(selected)
-        mp.set_property_bool("pause", false); mine_target(selected.text, selected.canonical)
+        mp.set_property_bool("pause", false); mine_target(selected.text, selected.canonical, selected.sense)
     end, function() mp.set_property_bool("pause", false) end)
 end
 
@@ -213,29 +221,20 @@ end
 -- Dispara a análise prévia de expressões da legenda do vídeo com IA
 local function trigger_expression_analysis()
     local video_path = mp.get_property("path")
-    if not video_path then
-        mp.osd_message("[AnkiMinerator] Nenhum video aberto", 3)
-        return
-    end
-
+    if not video_path then mp.osd_message("[AnkiMinerator] Nenhum video aberto", 3); return end
     mp.osd_message("[AnkiMinerator] Localizando legenda do video...", 2)
     local ok, err = analyzer.analyze_video_subtitles(video_path, nil, opts.gemini_api_key, opts.gemini_model,
-        function(current, total, items_found)
-            mp.osd_message(string.format("[AnkiMinerator] Analisando expressoes na legenda: lote %d/%d (%d detectadas)...", current, total, items_found or 0), 15)
+        function(cur, tot, fnd)
+            mp.osd_message(string.format("[AnkiMinerator] Analisando expressoes na legenda: %d/%d (%d detectadas)...", cur, tot, fnd or 0), 15)
         end,
-        function(total_found, error_count)
-            if total_found > 0 then
-                mp.osd_message(string.format("[AnkiMinerator] Analise concluida com sucesso!\n%d expressoes detectadas e salvas em cache.", total_found), 6)
-            else
-                mp.osd_message(string.format("[AnkiMinerator] Analise finalizada, mas nenhuma expressao foi encontrada.\n(Erros em lotes: %d - Veja: gemini_last_response.json)", error_count or 0), 6)
-            end
+        function(tot, errs)
+            local msg = (tot > 0) and string.format("[AnkiMinerator] Analise concluida! %d expressoes detectadas.", tot)
+                or string.format("[AnkiMinerator] Analise finalizada. 0 expressoes (Erros: %d)", errs or 0)
+            mp.osd_message(msg, 5)
             if last_cue then update_sub_overlay(last_cue.text) end
         end
     )
-
-    if not ok then
-        mp.osd_message(string.format("[AnkiMinerator] Nao foi possivel analisar:\n%s", tostring(err)), 6)
-    end
+    if not ok then mp.osd_message(string.format("[AnkiMinerator] Falha: %s", tostring(err)), 6) end
 end
 
 -- Alterna a exibição da legenda colorida
@@ -253,7 +252,9 @@ local function reload_vocabulary()
     local words, err = anki.fetch_deck_vocabulary(opts.deck_name, opts.front_field)
     if words then
         classifier.known_words = words
+        classifier.known_senses = anki.known_senses
         anki.save_cache(cache_file, words)
+        anki.save_senses_cache(senses_cache_file, anki.known_senses)
         anki.save_last_sync_date(sync_meta_file)
         local count = 0; for _ in pairs(words) do count = count + 1 end
         mp.osd_message(string.format("[AnkiMinerator] Vocabulario atualizado: %d palavras!", count), 3)
@@ -267,16 +268,16 @@ end
 -- Tenta sincronização diária incremental se for a primeira vez no dia
 local function try_daily_sync()
     if not opts.auto_sync_daily then return end
-    local count = anki.sync_daily(opts.deck_name, opts.auto_sync_days_back, sync_meta_file, classifier.known_words, cache_file, opts.front_field)
+    local count = anki.sync_daily(opts.deck_name, opts.auto_sync_days_back, sync_meta_file, classifier.known_words, cache_file, opts.front_field, senses_cache_file)
     if count and count > 0 then
+        classifier.known_senses = anki.known_senses
         mp.osd_message(string.format("[AnkiMinerator] Sync diario: +%d novos termos do Anki!", count), 3.5)
         if last_cue then update_sub_overlay(last_cue.text) end
     end
 end
 
 -- Eventos e inicialização
-init_vocabulary()
-try_daily_sync()
+init_vocabulary(); try_daily_sync()
 
 mp.register_event("file-loaded", function()
     local video_path = mp.get_property("path")
@@ -284,9 +285,7 @@ mp.register_event("file-loaded", function()
     try_daily_sync()
 end)
 
-mp.observe_property("sub-text", "string", function(_, val)
-    update_sub_overlay(val)
-end)
+mp.observe_property("sub-text", "string", function(_, val) update_sub_overlay(val) end)
 
 -- Teclas de atalho
 mp.add_key_binding("m", "minerator-open-menu", function() try_daily_sync(); open_mining_selector() end)

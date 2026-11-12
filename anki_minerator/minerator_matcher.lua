@@ -1,9 +1,8 @@
 -- minerator_matcher.lua
--- Reconhecimento inteligente de expressões, phrasal verbs, tempos verbais e particípios
+-- Reconhecimento de expressões, flexões verbais, separáveis e comparador semântico de polissemia
 
 local M = {}
 
--- Partículas mais comuns de phrasal verbs em inglês
 M.PARTICLES = {
     ["up"] = true, ["down"] = true, ["in"] = true, ["out"] = true,
     ["off"] = true, ["on"] = true, ["over"] = true, ["under"] = true,
@@ -13,7 +12,6 @@ M.PARTICLES = {
     ["into"] = true, ["onto"] = true
 }
 
--- Mapeamento de verbos irregulares comuns em phrasal verbs
 M.IRREGULAR_FORMS = {
     ["go"] = { "goes", "went", "gone", "going" },
     ["get"] = { "gets", "got", "gotten", "getting" },
@@ -57,18 +55,17 @@ M.IRREGULAR_FORMS = {
     ["drive"] = { "drives", "drove", "driven", "driving" },
     ["draw"] = { "draws", "drew", "drawn", "drawing" },
     ["shake"] = { "shakes", "shook", "shaken", "shaking" },
+    ["wind"] = { "winds", "wound", "winding" },
+    ["have"] = { "has", "had", "having" },
     ["lead"] = { "leads", "led", "leading" },
     ["light"] = { "lights", "lit", "lighted", "lighting" }
 }
 
 M.REVERSE_IRREGULAR = {}
 for base, forms in pairs(M.IRREGULAR_FORMS) do
-    for _, form in ipairs(forms) do
-        M.REVERSE_IRREGULAR[form] = base
-    end
+    for _, form in ipairs(forms) do M.REVERSE_IRREGULAR[form] = base end
 end
 
--- Gera lista de flexões temporais de um verbo (regular ou irregular)
 function M.get_verb_forms(verb)
     if not verb or verb == "" then return {} end
     local v = verb:lower()
@@ -79,11 +76,8 @@ function M.get_verb_forms(verb)
     elseif M.REVERSE_IRREGULAR[v] then
         local base = M.REVERSE_IRREGULAR[v]
         set[base] = true
-        if M.IRREGULAR_FORMS[base] then
-            for _, f in ipairs(M.IRREGULAR_FORMS[base]) do set[f] = true end
-        end
+        if M.IRREGULAR_FORMS[base] then for _, f in ipairs(M.IRREGULAR_FORMS[base]) do set[f] = true end end
     else
-        -- Regras de derivação regular (passado, gerúndio, 3ª pessoa)
         if v:match("e$") then
             local stem = v:sub(1, -2)
             set[v .. "s"] = true; set[v .. "d"] = true; set[stem .. "ing"] = true
@@ -92,12 +86,10 @@ function M.get_verb_forms(verb)
             set[stem .. "ies"] = true; set[stem .. "ied"] = true; set[v .. "ing"] = true
         elseif v:match("ed$") then
             local stem = v:sub(1, -3)
-            set[stem] = true; set[stem .. "s"] = true; set[stem .. "ing"] = true
-            set[stem .. "e"] = true; set[stem .. "es"] = true
+            set[stem] = true; set[stem .. "s"] = true; set[stem .. "ing"] = true; set[stem .. "e"] = true
         elseif v:match("ing$") then
             local stem = v:sub(1, -4)
-            set[stem] = true; set[stem .. "s"] = true; set[stem .. "ed"] = true
-            set[stem .. "e"] = true
+            set[stem] = true; set[stem .. "s"] = true; set[stem .. "ed"] = true; set[stem .. "e"] = true
         else
             set[v .. "s"] = true; set[v .. "es"] = true; set[v .. "ed"] = true; set[v .. "ing"] = true
             if v:match("[aeiou][b-df-hj-np-tv-z]$") and #v <= 5 then
@@ -112,7 +104,6 @@ function M.get_verb_forms(verb)
     return list
 end
 
--- Busca flexão de phrasal verb na sentença (ex: "look up" casa com "looked up" ou "looked it up")
 local function match_phrasal_verb(lower_text, text, words)
     local verb, particle = words[1], words[2]
     if not M.PARTICLES[particle] then return nil end
@@ -120,24 +111,23 @@ local function match_phrasal_verb(lower_text, text, words)
     local verb_forms = M.get_verb_forms(verb)
     local esc_part = particle:gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
 
-    -- 1. Forma contígua flexionada (ex: looked up, looking up, looks up)
     for _, vform in ipairs(verb_forms) do
         local esc_v = vform:gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
-        local s, e = lower_text:find("%f[%a]" .. esc_v .. "%s+" .. esc_part .. "%f[%A]")
-        if s and e then return s, e, text:sub(s, e) end
+        -- Contíguo (ex: looked up) ou separável por 1 a 3 palavras (ex: looked it up, get the hell out)
+        local patterns = {
+            "%f[%a]" .. esc_v .. "%s+" .. esc_part .. "%f[%A]",
+            "%f[%a]" .. esc_v .. "%s+[%w']+%s+" .. esc_part .. "%f[%A]",
+            "%f[%a]" .. esc_v .. "%s+[%w']+%s+[%w']+%s+" .. esc_part .. "%f[%A]",
+            "%f[%a]" .. esc_v .. "%s+[%w']+%s+[%w']+%s+[%w']+%s+" .. esc_part .. "%f[%A]"
+        }
+        for _, pat in ipairs(patterns) do
+            local s, e = lower_text:find(pat)
+            if s and e then return s, e, text:sub(s, e) end
+        end
     end
-
-    -- 2. Forma separável com pronome/objeto curto no meio (ex: looked it up, turn them off)
-    for _, vform in ipairs(verb_forms) do
-        local esc_v = vform:gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
-        local s, e = lower_text:find("%f[%a]" .. esc_v .. "%s+[%w']+%s+" .. esc_part .. "%f[%A]")
-        if s and e then return s, e, text:sub(s, e) end
-    end
-
     return nil
 end
 
--- Localiza a ocorrência de uma expressão na linha da legenda
 function M.find_expression_in_text(text, expr_or_str)
     if not text or text == "" or not expr_or_str then return nil end
     local lower_text = text:lower()
@@ -150,19 +140,16 @@ function M.find_expression_in_text(text, expr_or_str)
         canonical = tostring(expr_or_str):lower():match("^%s*(.-)%s*$") or ""
     end
 
-    -- 1. Casamento exato por matchedText
     if matched ~= "" and #matched > 2 then
         local s, e = lower_text:find("%f[%a]" .. matched:gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1") .. "%f[%A]")
         if s and e then return s, e, text:sub(s, e) end
     end
 
-    -- 2. Casamento exato por canonical
     if canonical ~= "" and #canonical > 2 then
         local s, e = lower_text:find("%f[%a]" .. canonical:gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1") .. "%f[%A]")
         if s and e then return s, e, text:sub(s, e) end
     end
 
-    -- 3. Casamento flexionado de verbos
     local words = {}
     for w in canonical:gmatch("[%w']+") do table.insert(words, w) end
     if #words >= 2 then
@@ -173,12 +160,10 @@ function M.find_expression_in_text(text, expr_or_str)
     return nil
 end
 
--- Verifica se uma palavra faz parte da expressão (literal ou como flexão verbal)
 function M.is_word_in_expression(word, expr_text)
     if not word or not expr_text then return false end
     local w = word:lower()
     local lower_expr = expr_text:lower()
-
     if lower_expr:find("%f[%a]" .. w .. "%f[%A]") then return true end
 
     for token in lower_expr:gmatch("[%w']+") do
@@ -190,5 +175,77 @@ function M.is_word_in_expression(word, expr_text)
     return false
 end
 
-return M
+-- Lematizador simples para comparação de sentido semântico
+function M.simple_stem(word)
+    local w = word:lower():match("^%s*(.-)%s*$") or ""
+    if #w <= 3 then return w end
+    if w:match("nesses$") then return w:sub(1, -7) end
+    if w:match("ness$") then return w:sub(1, -5) end
+    if w:match("tions$") then return w:sub(1, -6) end
+    if w:match("tion$") then return w:sub(1, -5) end
+    if w:match("ingly$") then return w:sub(1, -6) end
+    if w:match("ing$") and #w > 5 then return w:sub(1, -4) end
+    if w:match("edly$") then return w:sub(1, -5) end
+    if w:match("ed$") and #w > 4 then return w:sub(1, -3) end
+    if w:match("ies$") and #w > 4 then return w:sub(1, -4) .. "y" end
+    if w:match("es$") and #w > 4 then return w:sub(1, -3) end
+    if w:match("ly$") and #w > 4 then return w:sub(1, -3) end
+    if w:match("s$") and not w:match("ss$") and #w > 3 then return w:sub(1, -2) end
+    return w
+end
 
+local SENSE_STOPWORDS = {
+    ["a"]=true,["an"]=true,["the"]=true,["and"]=true,["or"]=true,["of"]=true,["to"]=true,["in"]=true,
+    ["for"]=true,["with"]=true,["on"]=true,["at"]=true,["by"]=true,["from"]=true,["as"]=true,["is"]=true,
+    ["be"]=true,["that"]=true,["this"]=true,["it"]=true,["not"]=true,["someone"]=true,["something"]=true,
+    ["de"]=true,["da"]=true,["do"]=true,["em"]=true,["para"]=true,["com"]=true,["um"]=true,["uma"]=true
+}
+
+function M.extract_sense_keywords(text)
+    local keywords = {}
+    if not text or text == "" then return keywords end
+    local clean = text:gsub("<[^>]+>", " "):lower()
+    for token in clean:gmatch("[%w']+") do
+        if #token >= 3 and not SENSE_STOPWORDS[token] and not token:match("^%d+$") then
+            local stem = M.simple_stem(token)
+            if #stem >= 3 and not SENSE_STOPWORDS[stem] then keywords[stem] = true end
+        end
+    end
+    return keywords
+end
+
+function M.compute_sense_overlap(set_a, set_b)
+    local size_a, size_b, matches = 0, 0, 0
+    for _ in pairs(set_a) do size_a = size_a + 1 end
+    for _ in pairs(set_b) do size_b = size_b + 1 end
+    if size_a == 0 or size_b == 0 then return 0 end
+    for item, _ in pairs(set_a) do
+        if set_b[item] then matches = matches + 1 end
+    end
+    return matches / math.min(size_a, size_b)
+end
+
+function M.is_same_sense(detected_sense, known_meanings, threshold)
+    if not detected_sense or detected_sense:match("^%s*$") then return true end
+    if not known_meanings or #known_meanings == 0 then return false end
+    local limit = threshold or 0.34
+    local det_keywords = M.extract_sense_keywords(detected_sense)
+    local count = 0; for _ in pairs(det_keywords) do count = count + 1 end
+    if count == 0 then return true end
+
+    for _, meaning in ipairs(known_meanings) do
+        local m_keywords = M.extract_sense_keywords(meaning)
+        if M.compute_sense_overlap(det_keywords, m_keywords) >= limit then return true end
+    end
+    return false
+end
+
+function M.extract_meaning_from_back(back_text)
+    if not back_text or back_text == "" then return "" end
+    local clean = back_text:gsub("<[^>]+>", " "):gsub("%s+", " "):match("^%s*(.-)%s*$") or ""
+    local m = clean:match("[Mm]eaning%s*:%s*([^.\r\n;]+)") or clean:match("[Ss]ignificado%s*:%s*([^.\r\n;]+)")
+    if m and #m > 2 then return m:match("^%s*(.-)%s*$") end
+    return clean:sub(1, 100)
+end
+
+return M

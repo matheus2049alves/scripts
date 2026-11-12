@@ -8,17 +8,19 @@ local utils = require("mp.utils")
 
 local M = {}
 
-M.known_words = {}    -- Verde: presente em alguma frente do deck
-M.manual_known = {}   -- Âmbar: lista "já sabia"
-M.postponed = {}      -- Cinza: adiados nesta sessão
+M.known_words = {}    -- Conhecidas: presentes em alguma frente do deck
+M.manual_known = {}   -- Lista "já sabia" manual
+M.postponed = {}      -- Adiados nesta sessão
+M.known_senses = {}   -- Mapa de sentidos conhecidos do Anki: termo -> { significado1, ... }
 
--- Cores padrão em formato ASS (BGR: &HBBGGRR&)
+-- Cores editoriais em formato ASS (BGR: &HBBGGRR&)
+-- Conhecidas e funcionais são texto branco neutro (fim do arco-íris)
 M.colors = {
-    new = "&H4444EF&",       -- Vermelho (#ef4444)
-    known = "&H7FFF00&",     -- Verde (rgb 0, 255, 127)
-    manual = "&H0B9EF5&",    -- Âmbar / Laranja (#f59e0b)
-    postponed = "&HAFA39C&", -- Cinza (#9ca3af)
-    neutral = "&HFFFFFF&"    -- Branco / Neutro
+    neutral = "&HEFF1ED&",        -- Branco suave / Off-white (#edf1ef)
+    new = "&H79BAE6&",            -- Âmbar suave (#e6ba79) para palavras novas
+    new_expression = "&HC8D48B&", -- Menta / Verde-água (#8bd4c8) para expressões novas
+    new_sense = "&HFF88B3&",      -- Violeta (#b388ff) para novos sentidos de polissemia
+    postponed = "&HC8CCBD&"       -- Cinza discreto (#bdccc8)
 }
 
 -- Classifica uma única palavra e devolve a cor ASS
@@ -30,34 +32,42 @@ function M.classify_word(raw_word)
     if M.postponed[norm] then
         return M.colors.postponed, "postponed"
     end
-    if M.manual_known[norm] then
-        return M.colors.manual, "manual_known"
-    end
-    if M.known_words[norm] then
-        return M.colors.known, "known"
+    if M.manual_known[norm] or M.known_words[norm] then
+        return M.colors.neutral, "known"
     end
     return M.colors.new, "new"
 end
 
--- Determina a cor de uma expressão baseada no status atômico dela (espelhando AnkiMinerator)
-local function classify_expression(expr, known_words, manual_known, postponed)
+-- Determina a cor e o tipo de uma expressão (incluindo detecção de novo sentido)
+local function classify_expression(expr, known_words, manual_known, postponed, known_senses)
     local canonical = cleaner.normalize_item(expr.canonical or "")
     local matched = cleaner.normalize_item(expr.matchedText or "")
 
     if (canonical ~= "" and postponed and postponed[canonical]) or (matched ~= "" and postponed and postponed[matched]) then
-        return M.colors.postponed
+        return M.colors.postponed, "postponed"
     end
     if (canonical ~= "" and manual_known and manual_known[canonical]) or (matched ~= "" and manual_known and manual_known[matched]) then
-        return M.colors.manual
+        return M.colors.neutral, "manual_known"
     end
-    if (canonical ~= "" and known_words and known_words[canonical]) or (matched ~= "" and known_words and known_words[matched]) then
-        return M.colors.known
+
+    local is_known = (canonical ~= "" and known_words and known_words[canonical]) or (matched ~= "" and known_words and known_words[matched])
+    if not is_known then
+        return M.colors.new_expression, "new"
     end
-    return M.colors.new
+
+    -- Se é conhecido mas possui sentido contextual detectado, avalia polissemia
+    if expr.sense and known_senses then
+        local senses = known_senses[canonical] or (matched ~= "" and known_senses[matched])
+        if senses and #senses > 0 and not matcher.is_same_sense(expr.sense, senses) then
+            return M.colors.new_sense, "new_sense"
+        end
+    end
+
+    return M.colors.neutral, "known"
 end
 
--- Identifica os intervalos de caracteres das expressões presentes no texto
-local function find_expression_ranges(cleaned_text, expressions, known_words, manual_known, postponed)
+-- Identifica os intervalos de caracteres das expressões que exigem destaque visual
+local function find_expression_ranges(cleaned_text, expressions, known_words, manual_known, postponed, known_senses)
     local ranges = {}
     if not expressions or #expressions == 0 then return ranges end
 
@@ -67,8 +77,10 @@ local function find_expression_ranges(cleaned_text, expressions, known_words, ma
             s, e = matcher.find_expression_in_text(cleaned_text, expr)
         end
         if s and e then
-            local color = classify_expression(expr, known_words, manual_known, postponed)
-            table.insert(ranges, { start_pos = s, end_pos = e, color = color })
+            local color, expr_type = classify_expression(expr, known_words, manual_known, postponed, known_senses)
+            if expr_type == "new" or expr_type == "new_sense" or expr_type == "postponed" then
+                table.insert(ranges, { start_pos = s, end_pos = e, color = color, type = expr_type })
+            end
         end
     end
     return ranges
@@ -82,13 +94,13 @@ local function get_active_range(pos, ranges)
     return nil
 end
 
--- Gera a linha da legenda com formatação ASS, cores e sublinhado em expressões
+-- Gera a linha da legenda com formatação ASS limpa e sublinhado em termos de destaque
 function M.format_ass_line(cleaned_text, font_size, expressions)
     if not cleaned_text or cleaned_text == "" then return "" end
 
     local size = font_size or 28
     local prefix = string.format("{\\an2\\fs%d\\b1\\bord2.5\\3c&H000000&\\shad1\\4c&H000000&}", size)
-    local ranges = find_expression_ranges(cleaned_text, expressions, M.known_words, M.manual_known, M.postponed)
+    local ranges = find_expression_ranges(cleaned_text, expressions, M.known_words, M.manual_known, M.postponed, M.known_senses)
     local parts, pos, total_len = {}, 1, #cleaned_text
     local in_underline = false
 

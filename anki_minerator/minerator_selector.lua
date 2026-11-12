@@ -33,19 +33,21 @@ function M.extract_candidates(sentence, known_words, detected_expressions, mode)
     local seen = {}
     local is_known_mode = (mode == "known")
 
-    -- 1. Inclui expressões multi-palavra detectadas que não sejam totalmente conhecidas
+    -- 1. Inclui expressões multi-palavra detectadas (inclui novo sentido mesmo se conhecida)
     if detected_expressions then
         for _, expr in ipairs(detected_expressions) do
             local text = expr.matchedText or expr.canonical
             local norm = cleaner.normalize_item(text)
             local can_norm = cleaner.normalize_item(expr.canonical or "")
             local is_known = (norm ~= "" and known_words[norm]) or (can_norm ~= "" and known_words[can_norm])
-            if norm ~= "" and not seen[norm] and not is_known then
+            local is_new_sense = (expr.type == "new_sense")
+            if norm ~= "" and not seen[norm] and (not is_known or is_new_sense or is_known_mode) then
                 seen[norm] = true
                 table.insert(candidates, {
                     text = text,
                     canonical = expr.canonical or text,
-                    type = expr.type or "expression"
+                    type = expr.type or "expression",
+                    sense = expr.sense
                 })
             end
         end
@@ -54,7 +56,7 @@ function M.extract_candidates(sentence, known_words, detected_expressions, mode)
     -- 2. Inclui palavras simples que são novas (e não pertencem a expressões já listadas)
     local words = cleaner.extract_words(sentence)
     for _, w in ipairs(words) do
-        if not stopwords.is_function_word(w) and not known_words[w] and not seen[w] then
+        if not stopwords.is_function_word(w) and (not known_words[w] or is_known_mode) and not seen[w] then
             local in_expression = false
             for _, expr in ipairs(candidates) do
                 if expr.type ~= "sentence" and expr.type ~= "all" and (matcher.is_word_in_expression(w, expr.text or "") or matcher.is_word_in_expression(w, expr.canonical or "")) then
@@ -109,9 +111,9 @@ function M.open_menu(candidates, on_select, on_cancel, opts_menu)
     M.active = true
 
     opts_menu = opts_menu or {}
-    local border = opts_menu.border_color or "&H0B9EF5&"
-    local cancel_col = opts_menu.cancel_color or "&H4444EF&"
-    local title = opts_menu.title_text or "  {\\1c&H4444EF&}MINERAR NO ANKI{\\1c&HFFFFFF&} — Escolha a palavra ou expressao em foco:\\N"
+    local border = opts_menu.border_color or "&H79BAE6&"
+    local cancel_col = opts_menu.cancel_color or "&HAFA39C&"
+    local title = opts_menu.title_text or "  {\\1c&H79BAE6&}MINERAR NO ANKI{\\1c&HFFFFFF&} — Escolha a palavra ou expressao em foco:\\N"
 
     local lines = {
         "{\\an5\\fs22\\b1\\bord2\\3c&H000000&\\shad1\\1c&HFFFFFF&}",
@@ -124,12 +126,13 @@ function M.open_menu(candidates, on_select, on_cancel, opts_menu)
     for i = 1, max_items do
         local cand = candidates[i]
         local label = cand.text
-        local tag = (cand.type == "word") and "{\\1c&H4444EF&}[Palavra]{\\1c&HFFFFFF&}"
+        local tag = (cand.type == "new_sense") and "{\\1c&HFF88B3&}[Novo Sentido]{\\1c&HFFFFFF&}"
+            or (cand.type == "word") and "{\\1c&H79BAE6&}[Palavra]{\\1c&HFFFFFF&}"
             or (cand.type == "sentence") and "{\\1c&HAFA39C&}[Sentenca]{\\1c&HFFFFFF&}"
-            or (cand.type == "all") and "{\\1c&H0B9EF5&}[Todas]{\\1c&HFFFFFF&}"
-            or "{\\1c&H0B9EF5&}[Expressao]{\\1c&HFFFFFF&}"
+            or (cand.type == "all") and "{\\1c&HC8D48B&}[Todas]{\\1c&HFFFFFF&}"
+            or "{\\1c&HC8D48B&}[Expressao]{\\1c&HFFFFFF&}"
 
-        table.insert(lines, string.format("   {\\1c&H7FFF00&}[%d]{\\1c&HFFFFFF&}  %s  %s\\N", i, label, tag))
+        table.insert(lines, string.format("   {\\1c&H79BAE6&}[%d]{\\1c&HFFFFFF&}  %s  %s\\N", i, label, tag))
 
         local idx = i
         mp.add_forced_key_binding(tostring(idx), "minerator-choice-" .. idx, function()
@@ -139,7 +142,7 @@ function M.open_menu(candidates, on_select, on_cancel, opts_menu)
     end
 
     table.insert(lines, string.format("{\\1c%s}───────────────────────────────────────────────{\\1c&HFFFFFF&}\\N", border))
-    table.insert(lines, string.format("  Pressione {\\1c&H7FFF00&}[1-%d]{\\1c&HFFFFFF&} para escolher | {\\1c%s}[ESC/Q]{\\1c&HFFFFFF&} Cancelar\\N", max_items, cancel_col))
+    table.insert(lines, string.format("  Pressione {\\1c&H79BAE6&}[1-%d]{\\1c&HFFFFFF&} para escolher | {\\1c%s}[ESC/Q]{\\1c&HFFFFFF&} Cancelar\\N", max_items, cancel_col))
     table.insert(lines, string.format("{\\1c%s}═══════════════════════════════════════════════{\\1c&HFFFFFF&}", border))
 
     local cancel_fn = function()
@@ -168,8 +171,8 @@ function M.open_known_menu(sentence, classifier, analyzer, manual_cache_file, on
 
     mp.set_property_bool("pause", true)
     local menu_opts = {
-        title_text = "  {\\1c&H0B9EF5&}JÁ SABIA (ÂMBAR){\\1c&HFFFFFF&} — Escolha o termo que você já conhece:\\N",
-        border_color = "&H0B9EF5&",
+        title_text = "  {\\1c&HC8CCBD&}JÁ SABIA{\\1c&HFFFFFF&} — Escolha o termo que você já conhece:\\N",
+        border_color = "&HC8CCBD&",
         cancel_color = "&HAFA39C&"
     }
 
@@ -177,10 +180,10 @@ function M.open_known_menu(sentence, classifier, analyzer, manual_cache_file, on
         mp.set_property_bool("pause", false)
         if selected.type == "all" then
             classifier.mark_sentence_as_known(sentence)
-            mp.osd_message("[AnkiMinerator] Frase inteira marcada como 'Já Sabia' (Âmbar)!", 2.5)
+            mp.osd_message("[AnkiMinerator] Frase inteira marcada como conhecida!", 2.5)
         else
             classifier.mark_term_as_known(selected.text)
-            mp.osd_message(string.format("[AnkiMinerator] '%s' marcado como 'Já Sabia' (Âmbar)!", selected.text), 2.5)
+            mp.osd_message(string.format("[AnkiMinerator] '%s' marcado como conhecido!", selected.text), 2.5)
         end
         if manual_cache_file then classifier.save_manual_cache(manual_cache_file) end
         if on_complete then on_complete() end

@@ -151,13 +151,13 @@ end
 local function build_batch_prompt(lines_chunk)
     local formatted = {}
     for i, line in ipairs(lines_chunk) do table.insert(formatted, string.format("[%d] %s", i, line)) end
-    return string.format([[You are an expert English linguist specialized in Second Language Acquisition (SLA).
-Analyze the transcript lines and identify Phrasal Verbs (e.g. "figure out"), Idioms (e.g. "at the end of the day"), and Collocations (e.g. "go high").
+    return string.format([[You are an expert English linguist specialized in SLA.
+Analyze transcript lines and identify Phrasal Verbs, Idioms, and Collocations.
 Lines:
 %s
-OUTPUT: Return ONLY a valid JSON array of objects (no markdown, no explanation).
-Format: [{"canonical": "infinitive base form (e.g. 'look up')", "matchedText": "exact verbatim inflected text in line (e.g. 'looked up', 'looking up', 'looked it up')", "type": "phrasal_verb|idiom|collocation", "line": 1}]. No single words.
-CRITICAL: matchedText MUST be the exact verbatim string from the line, preserving any past tense (-ed), gerund (-ing), or separated pronoun.]], table.concat(formatted, "\n"))
+OUTPUT: Return ONLY a valid JSON array of objects (no markdown).
+Format: [{"canonical": "base form (e.g. 'look up')", "matchedText": "exact verbatim inflected text (e.g. 'looked up')", "sense": "concise meaning in 2-4 English words (e.g. 'search for info')", "type": "phrasal_verb|idiom|collocation", "line": 1}]. No single words.
+CRITICAL: matchedText MUST be the exact verbatim string from the line, preserving past tense (-ed), gerund (-ing), or separated pronouns.]], table.concat(formatted, "\n"))
 end
 
 local function save_analyzer_log(payload_str, response_str, err_msg)
@@ -271,7 +271,7 @@ function M.find_expressions_in_sentence(sentence, known_words, manual_known)
                 local key = (expr.canonical or m):lower()
                 if not seen[key] then
                     seen[key] = true
-                    table.insert(found, { canonical = expr.canonical or m, matchedText = m, type = expr.type or "expression", start_pos = s, end_pos = e })
+                    table.insert(found, { canonical = expr.canonical or m, matchedText = m, type = expr.type or "expression", sense = expr.sense, start_pos = s, end_pos = e })
                 end
             end
         end
