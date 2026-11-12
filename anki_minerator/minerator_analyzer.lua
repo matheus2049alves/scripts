@@ -5,6 +5,7 @@
 local utils = require("mp.utils")
 local gemini = require("minerator_gemini")
 local cleaner = require("minerator_cleaner")
+local matcher = require("minerator_matcher")
 
 local M = {}
 
@@ -56,32 +57,24 @@ function M.find_ffmpeg()
         local f = io.open(M.ffmpeg_path, "r")
         if f then f:close(); return M.ffmpeg_path end
     end
-    local local_mpv_ffmpeg = "C:\\mpv\\ffmpeg.exe"
-    local f_mpv = io.open(local_mpv_ffmpeg, "r")
-    if f_mpv then f_mpv:close(); return local_mpv_ffmpeg end
+    local f_mpv = io.open("C:\\mpv\\ffmpeg.exe", "r")
+    if f_mpv then f_mpv:close(); return "C:\\mpv\\ffmpeg.exe" end
 
-    local res = mp.command_native({
-        name = "subprocess",
-        playback_only = false,
-        capture_stdout = true,
-        args = { "ffmpeg.exe", "-version" }
-    })
-    if res.status == 0 then return "ffmpeg.exe" end
-    return nil
+    local res = mp.command_native({ name = "subprocess", playback_only = false, capture_stdout = true, args = { "ffmpeg.exe", "-version" } })
+    return res.status == 0 and "ffmpeg.exe" or nil
 end
 
 -- Obtém o índice relativo da trilha de legenda selecionada no contêiner
 function M.get_selected_sub_index()
     local tracks = mp.get_property_native("track-list") or {}
     local sub_counter = 0
-    local target_idx = 0
     for _, track in ipairs(tracks) do
         if track.type == "sub" then
-            if track.selected then target_idx = sub_counter break end
+            if track.selected then return sub_counter end
             sub_counter = sub_counter + 1
         end
     end
-    return target_idx
+    return 0
 end
 
 -- Extrai a trilha de legenda de texto embutida no MKV/MP4 para um arquivo temporário
@@ -94,10 +87,7 @@ function M.extract_embedded_sub(video_path)
     local temp_srt = utils.join_path(temp_dir, string.format("minerator_extracted_%d.srt", os.time()))
 
     local res = mp.command_native({
-        name = "subprocess",
-        playback_only = false,
-        capture_stdout = true,
-        capture_stderr = true,
+        name = "subprocess", playback_only = false, capture_stdout = true, capture_stderr = true,
         args = { ffmpeg_bin, "-y", "-i", video_path, "-map", "0:s:" .. tostring(sub_idx), "-c:s", "srt", temp_srt }
     })
 
@@ -106,11 +96,9 @@ function M.extract_embedded_sub(video_path)
     end
 
     local f = io.open(temp_srt, "r")
-    if f then
-        local content = f:read("*all")
-        f:close()
-        if content and #content > 20 then return temp_srt, nil end
-    end
+    local content = f and f:read("*all")
+    if f then f:close() end
+    if content and #content > 20 then return temp_srt, nil end
     return nil, "A trilha extraida esta vazia (pode ser legenda de imagem PGS/VobSub)"
 end
 
@@ -168,27 +156,23 @@ Analyze the transcript lines and identify Phrasal Verbs (e.g. "figure out"), Idi
 Lines:
 %s
 OUTPUT: Return ONLY a valid JSON array of objects (no markdown, no explanation).
-Format: [{"canonical": "base form", "matchedText": "verbatim text in line", "type": "phrasal_verb|idiom|collocation", "line": 1}]. No single words.]], table.concat(formatted, "\n"))
+Format: [{"canonical": "infinitive base form (e.g. 'look up')", "matchedText": "exact verbatim inflected text in line (e.g. 'looked up', 'looking up', 'looked it up')", "type": "phrasal_verb|idiom|collocation", "line": 1}]. No single words.
+CRITICAL: matchedText MUST be the exact verbatim string from the line, preserving any past tense (-ed), gerund (-ing), or separated pronoun.]], table.concat(formatted, "\n"))
 end
 
 local function save_analyzer_log(payload_str, response_str, err_msg)
-    local script_dir = mp.get_script_directory() or "c:/mpv/portable_config/scripts/anki_minerator"
-    local debug_path = utils.join_path(script_dir, "gemini_last_response.json")
-    local f = io.open(debug_path, "w")
-    if not f then return end
-    f:write(utils.format_json({ action = "expression_analyzer", timestamp = os.date("%Y-%m-%d %H:%M:%S"), payload = payload_str, raw_response = response_str, error = err_msg }) or tostring(response_str))
-    f:close()
+    local path = utils.join_path(mp.get_script_directory() or "c:/mpv/portable_config/scripts/anki_minerator", "gemini_last_response.json")
+    local f = io.open(path, "w")
+    if f then
+        f:write(utils.format_json({ action = "expression_analyzer", timestamp = os.date("%Y-%m-%d %H:%M:%S"), payload = payload_str, raw_response = response_str, error = err_msg }) or "")
+        f:close()
+    end
 end
 
 local function analyze_chunk(lines_chunk, api_key, model_name)
     local prompt = build_batch_prompt(lines_chunk)
-    local payload = {
-        contents = { { parts = { { text = prompt } } } },
-        generationConfig = { temperature = 0.1, responseMimeType = "application/json" }
-    }
-    local json_body = utils.format_json(payload)
-    local temp_dir = os.getenv("TEMP") or "C:\\Windows\\Temp"
-    local temp_json = utils.join_path(temp_dir, string.format("minerator_chunk_%d.json", os.time()))
+    local json_body = utils.format_json({ contents = { { parts = { { text = prompt } } } }, generationConfig = { temperature = 0.1, responseMimeType = "application/json" } })
+    local temp_json = utils.join_path(os.getenv("TEMP") or "C:\\Windows\\Temp", string.format("minerator_chunk_%d.json", os.time()))
     local f = io.open(temp_json, "w")
     if not f then return nil, "Falha ao criar arquivo de payload temporario" end
     f:write(json_body); f:close()
@@ -275,20 +259,39 @@ function M.analyze_video_subtitles(video_path, srt_path, api_key, model_name, on
     return true, nil
 end
 
-function M.find_expressions_in_sentence(sentence)
+function M.find_expressions_in_sentence(sentence, known_words, manual_known)
     local found = {}
-    if not sentence or not M.active_expressions or #M.active_expressions == 0 then return found end
-    local lower_sentence = " " .. sentence:lower() .. " "
+    if not sentence or sentence == "" then return found end
     local seen = {}
-    for _, expr in ipairs(M.active_expressions) do
-        local target = (expr.matchedText or expr.canonical or ""):lower():match("^%s*(.-)%s*$")
-        if target and #target > 2 and not seen[target] then
-            if lower_sentence:find("%f[%a]" .. target .. "%f[%A]") or lower_sentence:find(target, 1, true) then
-                seen[target] = true
-                table.insert(found, expr)
+
+    if M.active_expressions and #M.active_expressions > 0 then
+        for _, expr in ipairs(M.active_expressions) do
+            local s, e, m = matcher.find_expression_in_text(sentence, expr)
+            if s and e and m then
+                local key = (expr.canonical or m):lower()
+                if not seen[key] then
+                    seen[key] = true
+                    table.insert(found, { canonical = expr.canonical or m, matchedText = m, type = expr.type or "expression", start_pos = s, end_pos = e })
+                end
             end
         end
     end
+
+    local function scan_tbl(tbl)
+        if not tbl then return end
+        for term, _ in pairs(tbl) do
+            if term:find("%s") and not seen[term:lower()] then
+                local s, e, m = matcher.find_expression_in_text(sentence, term)
+                if s and e and m then
+                    seen[term:lower()] = true
+                    table.insert(found, { canonical = term, matchedText = m, type = "expression", start_pos = s, end_pos = e })
+                end
+            end
+        end
+    end
+    scan_tbl(manual_known)
+    scan_tbl(known_words)
+
     return found
 end
 

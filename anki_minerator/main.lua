@@ -25,6 +25,8 @@ local opts = {
     back_field = "Back",
     tsv_fallback_path = "C:\\Dev\\anki-minerator\\CIMV.txt",
     cache_path = "",
+    auto_sync_daily = true,
+    auto_sync_days_back = 7,
     color_enabled = true,
     font_size = 28,
     audio_padding_start = 0.15,
@@ -53,14 +55,13 @@ end
 load_local_conf(utils.join_path(script_dir, "anki_minerator.conf"))
 
 anki.anki_url = opts.anki_url
-media.ffmpeg_path = opts.ffmpeg_path
-media.audio_padding_start = opts.audio_padding_start
-media.audio_padding_end = opts.audio_padding_end
-analyzer.ffmpeg_path = opts.ffmpeg_path
+media.ffmpeg_path, analyzer.ffmpeg_path = opts.ffmpeg_path, opts.ffmpeg_path
+media.audio_padding_start, media.audio_padding_end = opts.audio_padding_start, opts.audio_padding_end
 
 local default_cache = utils.join_path(script_dir, "vocab_cache.json")
 local cache_file = (opts.cache_path ~= "") and opts.cache_path or default_cache
 local manual_cache_file = utils.join_path(script_dir, "manual_known_cache.json")
+local sync_meta_file = utils.join_path(script_dir, "sync_meta.json")
 
 local overlay = mp.create_osd_overlay("ass-events")
 local last_cue = nil
@@ -103,13 +104,13 @@ local function update_sub_overlay(raw_sub)
     }
 
     mp.set_property_bool("sub-visibility", false)
-    local exprs = analyzer.find_expressions_in_sentence(clean_text)
+    local exprs = analyzer.find_expressions_in_sentence(clean_text, classifier.known_words, classifier.manual_known)
     overlay.data = classifier.format_ass_line(clean_text, opts.font_size, exprs)
     overlay:update()
 end
 
 -- Minera o termo escolhido para o Anki
-local function mine_target(target_term)
+local function mine_target(target_term, canonical_term)
     if not last_cue or not last_cue.text or last_cue.text == "" then
         mp.osd_message("[AnkiMinerator] Nenhuma legenda ativa para minerar", 2.5)
         return
@@ -151,13 +152,9 @@ local function mine_target(target_term)
         highlighted_sentence, audio_filename, snap_filename
     )
 
-    local fields = {}
-    fields[opts.front_field] = front_html
-    fields[opts.back_field] = back_html
-
+    local fields = { [opts.front_field] = front_html, [opts.back_field] = back_html }
     local note_id, anki_err = anki.add_card(opts.deck_name, opts.model_name, fields, { "anki-minerator", "mpv-mining" })
-    os.remove(temp_audio)
-    os.remove(temp_snap)
+    os.remove(temp_audio); os.remove(temp_snap)
 
     if not note_id then
         mp.osd_message("[AnkiMinerator] Erro Anki: " .. tostring(anki_err), 5)
@@ -166,6 +163,10 @@ local function mine_target(target_term)
 
     local norm = cleaner.normalize_item(target_term)
     if norm ~= "" then classifier.known_words[norm] = true end
+    if canonical_term and canonical_term ~= target_term then
+        local cnorm = cleaner.normalize_item(canonical_term)
+        if cnorm ~= "" then classifier.known_words[cnorm] = true end
+    end
     anki.save_cache(cache_file, classifier.known_words)
 
     if ai_text then
@@ -183,22 +184,19 @@ local function open_mining_selector()
         return
     end
 
-    local exprs = analyzer.find_expressions_in_sentence(last_cue.text)
+    local exprs = analyzer.find_expressions_in_sentence(last_cue.text, classifier.known_words, classifier.manual_known)
     local candidates = selector.extract_candidates(last_cue.text, classifier.known_words, exprs)
 
     -- Se só tiver 1 termo novo além da frase completa, minera direto
     if #candidates == 2 and candidates[1].type == "word" then
-        mine_target(candidates[1].text)
+        mine_target(candidates[1].text, candidates[1].canonical)
         return
     end
 
     mp.set_property_bool("pause", true)
     selector.open_menu(candidates, function(selected)
-        mp.set_property_bool("pause", false)
-        mine_target(selected.text)
-    end, function()
-        mp.set_property_bool("pause", false)
-    end)
+        mp.set_property_bool("pause", false); mine_target(selected.text, selected.canonical)
+    end, function() mp.set_property_bool("pause", false) end)
 end
 
 -- Abre o menu de seleção para marcar termo como "Já Sabia" (Âmbar)
@@ -252,10 +250,11 @@ end
 -- Sincroniza o vocabulário com o AnkiConnect
 local function reload_vocabulary()
     mp.osd_message("[AnkiMinerator] Sincronizando com AnkiConnect...", 1.5)
-    local words, err = anki.fetch_deck_vocabulary(opts.deck_name)
+    local words, err = anki.fetch_deck_vocabulary(opts.deck_name, opts.front_field)
     if words then
         classifier.known_words = words
         anki.save_cache(cache_file, words)
+        anki.save_last_sync_date(sync_meta_file)
         local count = 0; for _ in pairs(words) do count = count + 1 end
         mp.osd_message(string.format("[AnkiMinerator] Vocabulario atualizado: %d palavras!", count), 3)
     else
@@ -265,14 +264,24 @@ local function reload_vocabulary()
     if last_cue then update_sub_overlay(last_cue.text) end
 end
 
+-- Tenta sincronização diária incremental se for a primeira vez no dia
+local function try_daily_sync()
+    if not opts.auto_sync_daily then return end
+    local count = anki.sync_daily(opts.deck_name, opts.auto_sync_days_back, sync_meta_file, classifier.known_words, cache_file, opts.front_field)
+    if count and count > 0 then
+        mp.osd_message(string.format("[AnkiMinerator] Sync diario: +%d novos termos do Anki!", count), 3.5)
+        if last_cue then update_sub_overlay(last_cue.text) end
+    end
+end
+
 -- Eventos e inicialização
 init_vocabulary()
+try_daily_sync()
 
 mp.register_event("file-loaded", function()
     local video_path = mp.get_property("path")
-    if video_path then
-        analyzer.load_cached_expressions(video_path)
-    end
+    if video_path then analyzer.load_cached_expressions(video_path) end
+    try_daily_sync()
 end)
 
 mp.observe_property("sub-text", "string", function(_, val)
@@ -280,8 +289,8 @@ mp.observe_property("sub-text", "string", function(_, val)
 end)
 
 -- Teclas de atalho
-mp.add_key_binding("m", "minerator-open-menu", open_mining_selector)
-mp.add_key_binding("Ctrl+m", "minerator-mine-direct", open_mining_selector)
+mp.add_key_binding("m", "minerator-open-menu", function() try_daily_sync(); open_mining_selector() end)
+mp.add_key_binding("Ctrl+m", "minerator-mine-direct", function() try_daily_sync(); open_mining_selector() end)
 mp.add_key_binding("Alt+a", "minerator-analyze-subtitles", trigger_expression_analysis)
 mp.add_key_binding("c", "minerator-toggle-color", toggle_color_overlay)
 mp.add_key_binding("Ctrl+Shift+r", "minerator-reload-vocab", reload_vocabulary)

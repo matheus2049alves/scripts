@@ -94,13 +94,14 @@ function M.add_card(deck_name, model_name, fields_table, tags_table)
 end
 
 -- Extrai palavras de um conjunto de notas do Anki
-local function extract_words_from_notes(notes, known_words)
+local function extract_words_from_notes(notes, known_words, front_field)
     local count = 0
     for _, note in ipairs(notes) do
         local fields = note.fields or {}
-        -- Procura campo de frente (Front, Frente, etc.) ou pega o primeiro
-        local front_val = fields.Front and fields.Front.value
-            or fields.Frente and fields.Frente.value
+        -- Procura campo de frente especificado ou padrões (Front, Frente, etc.)
+        local front_val = (front_field and fields[front_field] and fields[front_field].value)
+            or (fields.Front and fields.Front.value)
+            or (fields.Frente and fields.Frente.value)
         if not front_val then
             for _, f_data in pairs(fields) do
                 front_val = f_data.value
@@ -130,30 +131,41 @@ local function extract_words_from_notes(notes, known_words)
     return count
 end
 
--- Sincroniza todo o vocabulário das frentes de um deck via AnkiConnect
-function M.fetch_deck_vocabulary(deck_name)
-    local query = 'deck:"' .. deck_name .. '"'
+-- Executa busca de notas por query e extrai palavras das frentes
+local function fetch_vocabulary_by_query(query, front_field)
     local note_ids, err = M.request("findNotes", { query = query })
     if err or not note_ids then
         return nil, err or "Nenhuma nota encontrada"
     end
-
-    local known_words = {}
-    local batch_size = 500
-    local total_notes = #note_ids
-
-    for i = 1, total_notes, batch_size do
-        local batch = {}
-        for j = i, math.min(i + batch_size - 1, total_notes) do
-            table.insert(batch, note_ids[j])
-        end
-        local notes_info, info_err = M.request("notesInfo", { notes = batch })
-        if notes_info then
-            extract_words_from_notes(notes_info, known_words)
-        end
+    if #note_ids == 0 then
+        return {}, nil
     end
 
-    return known_words, nil
+    local words = {}
+    local batch_size = 500
+    for i = 1, #note_ids, batch_size do
+        local batch = {}
+        for j = i, math.min(i + batch_size - 1, #note_ids) do
+            table.insert(batch, note_ids[j])
+        end
+        local notes_info = M.request("notesInfo", { notes = batch })
+        if notes_info then
+            extract_words_from_notes(notes_info, words, front_field)
+        end
+    end
+    return words, nil
+end
+
+-- Sincroniza todo o vocabulário das frentes de um deck via AnkiConnect
+function M.fetch_deck_vocabulary(deck_name, front_field)
+    return fetch_vocabulary_by_query('deck:"' .. deck_name .. '"', front_field)
+end
+
+-- Busca vocabulário incremental de notas criadas ou modificadas recentemente
+function M.fetch_incremental_vocabulary(deck_name, days_back, front_field)
+    local days = tonumber(days_back) or 7
+    local query = string.format('deck:"%s" (added:%d or edited:%d)', deck_name, days, days)
+    return fetch_vocabulary_by_query(query, front_field)
 end
 
 -- Carrega vocabulário diretamente de um arquivo TSV exportado do Anki (ex: CIMV.txt)
@@ -223,6 +235,64 @@ function M.load_cache(cache_path)
         known_words[w] = true
     end
     return known_words
+end
+
+-- Obtém a data do último sync registrada em arquivo JSON
+function M.get_last_sync_date(meta_path)
+    local f = io.open(meta_path, "r")
+    if not f then return nil end
+    local content = f:read("*all")
+    f:close()
+    local data = utils.parse_json(content)
+    return (data and type(data) == "table") and data.last_sync_date or nil
+end
+
+-- Salva a data do último sync no arquivo de controle
+function M.save_last_sync_date(meta_path, date_str)
+    local data = {
+        last_sync_date = date_str or os.date("%Y-%m-%d"),
+        timestamp = os.time()
+    }
+    local f = io.open(meta_path, "w")
+    if not f then return false end
+    f:write(utils.format_json(data) or "{}")
+    f:close()
+    return true
+end
+
+-- Verifica se já foi sincronizado hoje
+function M.is_synced_today(meta_path)
+    return M.get_last_sync_date(meta_path) == os.date("%Y-%m-%d")
+end
+
+-- Sincronização diária incremental: roda apenas se ainda não sincronizou hoje e o Anki estiver online
+function M.sync_daily(deck_name, days_back, meta_path, known_words, cache_path, front_field)
+    if M.is_synced_today(meta_path) then
+        return nil, "already_synced"
+    end
+    local online = M.check_status()
+    if not online then
+        return nil, "anki_offline"
+    end
+
+    local inc_words, err = M.fetch_incremental_vocabulary(deck_name, days_back, front_field)
+    if not inc_words then
+        return nil, err
+    end
+
+    local added = 0
+    for w, _ in pairs(inc_words) do
+        if not known_words[w] then
+            known_words[w] = true
+            added = added + 1
+        end
+    end
+
+    M.save_last_sync_date(meta_path)
+    if added > 0 then
+        M.save_cache(cache_path, known_words)
+    end
+    return added, nil
 end
 
 return M

@@ -3,6 +3,7 @@
 
 local cleaner = require("minerator_cleaner")
 local stopwords = require("minerator_stopwords")
+local matcher = require("minerator_matcher")
 local utils = require("mp.utils")
 
 local M = {}
@@ -59,18 +60,15 @@ end
 local function find_expression_ranges(cleaned_text, expressions, known_words, manual_known, postponed)
     local ranges = {}
     if not expressions or #expressions == 0 then return ranges end
-    local lower_text = cleaned_text:lower()
 
     for _, expr in ipairs(expressions) do
-        local target = (expr.matchedText or expr.canonical or ""):lower():match("^%s*(.-)%s*$")
-        if target and #target > 2 then
-            local escaped = target:gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
-            local s, e = lower_text:find("%f[%a]" .. escaped .. "%f[%A]")
-            if not s then s, e = lower_text:find(escaped, 1, true) end
-            if s and e then
-                local color = classify_expression(expr, known_words, manual_known, postponed)
-                table.insert(ranges, { start_pos = s, end_pos = e, color = color })
-            end
+        local s, e = expr.start_pos, expr.end_pos
+        if not (s and e) then
+            s, e = matcher.find_expression_in_text(cleaned_text, expr)
+        end
+        if s and e then
+            local color = classify_expression(expr, known_words, manual_known, postponed)
+            table.insert(ranges, { start_pos = s, end_pos = e, color = color })
         end
     end
     return ranges

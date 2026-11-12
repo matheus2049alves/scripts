@@ -3,6 +3,7 @@
 
 local cleaner = require("minerator_cleaner")
 local stopwords = require("minerator_stopwords")
+local matcher = require("minerator_matcher")
 
 local M = {}
 
@@ -56,7 +57,7 @@ function M.extract_candidates(sentence, known_words, detected_expressions, mode)
         if not stopwords.is_function_word(w) and not known_words[w] and not seen[w] then
             local in_expression = false
             for _, expr in ipairs(candidates) do
-                if expr.type ~= "sentence" and expr.type ~= "all" and expr.canonical:lower():find("%f[%a]" .. w .. "%f[%A]") then
+                if expr.type ~= "sentence" and expr.type ~= "all" and (matcher.is_word_in_expression(w, expr.text or "") or matcher.is_word_in_expression(w, expr.canonical or "")) then
                     in_expression = true
                     break
                 end
